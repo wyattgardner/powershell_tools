@@ -1,0 +1,14 @@
+name: ServerToolUpdater
+version: 1.1.0
+main: servertool.updater.UpdaterPlugin
+api-version: 1.13
+description: Runs update-spigot.ps1 for this server via a Windows scheduled task.
+commands:
+  update:
+    description: Update Spigot and plugins now (one restart, with a warning if anyone's on).
+    usage: "/update  - update now. /update confirm - also allow a new Minecraft version (upgrades the world for good)."
+    permission: servertool.update
+permissions:
+  servertool.update:
+    description: Allows /update.
+    default: op

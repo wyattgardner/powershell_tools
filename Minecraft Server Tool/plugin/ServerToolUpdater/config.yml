@@ -1,0 +1,6 @@
+# Windows scheduled task that runs update-spigot.ps1 for THIS server.
+# install-automation.ps1 fills this in per server; it's "Minecraft Update - <server folder>".
+task-name: ""
+
+# Ignore repeat /update calls within this many seconds.
+cooldown-seconds: 60

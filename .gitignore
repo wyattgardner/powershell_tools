@@ -1,0 +1,16 @@
+# Shared rules for the whole repo. Each tool folder has its own .gitignore for what that tool generates.
+
+# Logs and backups any tool or editor can leave behind
+*.log
+*.bak
+*.bak-*
+*.tmp
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp

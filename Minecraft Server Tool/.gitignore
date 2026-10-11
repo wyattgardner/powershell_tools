@@ -1,0 +1,19 @@
+# Your servers: configs with RCON passwords, logs
+/servers/
+
+# Downloaded by install.cmd
+/bin/
+/lan-console/mcrcon.exe
+
+# Your settings
+/settings.ps1
+/install.config.ps1
+/lan-console/lan-console.config.ps1
+
+# Generated
+/logs/
+/BuildTools/
+/plugin/build/
+
+# Release zips
+/*.zip

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copy of Spigot's built-in log4j2.xml (from inside the jar) with full ISO-8601
+     timestamps. Only the %d{...} patterns differ from the default.
+     Loaded via -Dlog4j.configurationFile=log4j2.xml in the service's NSSM
+     AppParameters. install-server.ps1 copies it into the server folder. -->
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="SysOut" target="SYSTEM_OUT">
+            <PatternLayout pattern="[%d{yyyy-MM-dd'T'HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+        </Console>
+        <Queue name="ServerGuiConsole">
+            <PatternLayout pattern="[%d{yyyy-MM-dd'T'HH:mm:ss} %level]: %msg{nolookups}%n" />
+        </Queue>
+        <Queue name="TerminalConsole">
+            <PatternLayout pattern="[%d{yyyy-MM-dd'T'HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+        </Queue>
+        <RollingRandomAccessFile name="File" fileName="logs/latest.log" filePattern="logs/%d{yyyy-MM-dd}-%i.log.gz">
+            <PatternLayout pattern="[%d{yyyy-MM-dd'T'HH:mm:ss}] [%t/%level]: %msg{nolookups}%n" />
+            <Policies>
+                <TimeBasedTriggeringPolicy />
+                <OnStartupTriggeringPolicy />
+            </Policies>
+            <DefaultRolloverStrategy max="1000"/>
+        </RollingRandomAccessFile>
+    </Appenders>
+    <Loggers>
+        <Root level="info">
+            <filters>
+                <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
+            </filters>
+            <AppenderRef ref="SysOut" level="info"/>
+            <AppenderRef ref="File"/>
+            <AppenderRef ref="ServerGuiConsole" level="info"/>
+            <AppenderRef ref="TerminalConsole" level="info"/>
+        </Root>
+    </Loggers>
+</Configuration>
