@@ -354,6 +354,9 @@ function Test-IsSet($item) {
 function Find-ProgId($s) {
     # Your exact choice, if this PC has it and it belongs to the same app
     if ((Test-ProgId $s.ProgId) -and (Get-AppKey $s.ProgId $index) -eq $s.App -and (Test-ProgIdCommand $s.ProgId)) { return $s.ProgId }
+    # Also when no app on this PC claims that ProgId and its program is here. The old PC can pin it on the wrong app
+    # (7-Zip.iso recorded as Windows Disc Image Burner), and that app's own ProgId would undo your choice.
+    if ((Test-ProgId $s.ProgId) -and -not $index.ByProgId.ContainsKey($s.ProgId) -and (Get-ProgIdExe $s.ProgId) -and (Test-ProgIdCommand $s.ProgId)) { return $s.ProgId }
     if ($s.App -like 'reg:*') {
         $app = $index.Apps[$s.App]
         if (-not $app) { return $null }
@@ -374,7 +377,11 @@ $plan = [ordered]@{}
 $skipped = New-Object System.Collections.Generic.List[object]
 foreach ($s in $saved) {
     $p = Find-ProgId $s
-    if ($p) { $plan[$s.Identifier] = [pscustomobject]@{ Identifier = $s.Identifier; ProgId = $p; AppName = $s.AppName; App = $s.App; Why = 'Your choice' } }
+    if ($p) {
+        $k = Get-AppKey $p $index
+        $name = if ($k -eq $s.App) { $s.AppName } else { Get-AppName $p $k $index }   # the old PC may have named the wrong app
+        $plan[$s.Identifier] = [pscustomobject]@{ Identifier = $s.Identifier; ProgId = $p; AppName = $name; App = $s.App; Why = 'Your choice' }
+    }
     else { $skipped.Add($s) }
 }
 
