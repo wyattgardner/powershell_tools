@@ -1382,6 +1382,16 @@ if ($IsAdmin) {
     $n = 0
     foreach ($v in @(Read-JsonArray "$Path\machine.json")) { try { Write-RegValue $v; $n++ } catch { Write-Warning "Couldn't set $($v.Key)\$($v.Name)" } }
     Write-Host "Machine-wide: $n values applied"
+    # The sign-in screen takes Num Lock from the system profile, not yours, so copy your Num Lock bit there too
+    $nl = Get-Reg 'HKCU\Control Panel\Keyboard' InitialKeyboardIndicators
+    if ($null -ne $nl) {
+        try {
+            $sysKb = 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard'
+            $cur = [int64](Or (Get-ItemProperty -LiteralPath $sysKb -EA SilentlyContinue).InitialKeyboardIndicators 0)
+            $new = ($cur -band -bnot 2) -bor ([int64]$nl -band 2)
+            if ($new -ne $cur) { Set-ItemProperty -LiteralPath $sysKb InitialKeyboardIndicators "$new"; Write-Host "Num Lock on the sign-in screen: $(OnOff ($new -band 2))" }
+        } catch { Write-Warning "Couldn't set Num Lock for the sign-in screen: $(Get-ErrorText $_)" }
+    }
     if ($sys.HibernateAvailable -ne [bool](Get-HibernateAvailable)) { powercfg /hibernate $(if ($sys.HibernateAvailable) { 'on' } else { 'off' }) }
     if ((Get-WinSystemLocale).Name -ne $sys.SystemLocale) { Set-WinSystemLocale $sys.SystemLocale; Write-Host "System locale set to $($sys.SystemLocale) (needs a restart)" }
     $have = @(Get-HostsEntries)
