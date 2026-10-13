@@ -333,16 +333,18 @@ function Write-RegValue($v) {
 function Read-JsonArray($file) { if (Test-Path $file) { $x = Get-Content $file -Raw | ConvertFrom-Json; foreach ($i in $x) { $i } } }
 function Save-Json($obj, $file) { ConvertTo-Json -InputObject $obj -Depth 6 | Set-Content $file -Encoding UTF8 }
 
-# Everything pinned to the taskbar: shortcut files, plus Store apps that exist only in the taskbar's pin list
+# What's actually pinned to the taskbar, read from its pin list: the shortcut files it points at, plus Store apps.
+# Leftover shortcut files the pin list doesn't use aren't pins, so they don't count.
 function Get-TaskbarPins {
-    $names = @(Get-ChildItem -LiteralPath $PinnedDir -Recurse -Filter *.lnk -EA SilentlyContinue | ForEach-Object BaseName)
     $fav = Get-Reg "$CV\Explorer\Taskband" Favorites
-    if ($fav) {
-        $pkgs = [regex]::Matches([Text.Encoding]::Unicode.GetString($fav), 'WindowsApps\\([^_\\]+)_') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
-        if ($pkgs) {
-            $start = @(Get-StartApps)
-            foreach ($p in $pkgs) { $names += Or (($start | Where-Object { $_.AppID -like "$p`_*" } | Select-Object -First 1).Name) $p }
-        }
+    if (-not $fav) { return @() }
+    # Names sit at both odd and even byte offsets in the pin list, so decode it both ways
+    $text = [Text.Encoding]::Unicode.GetString($fav) + '|' + [Text.Encoding]::Unicode.GetString($fav, 1, $fav.Length - 1)
+    $names = @(Get-ChildItem -LiteralPath $PinnedDir -Recurse -Filter *.lnk -EA SilentlyContinue | Where-Object { $text.IndexOf($_.Name, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object BaseName)
+    $pkgs = [regex]::Matches($text, 'WindowsApps\\([^_\\]+)_') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    if ($pkgs) {
+        $start = @(Get-StartApps)
+        foreach ($p in $pkgs) { $names += Or (($start | Where-Object { $_.AppID -like "$p`_*" } | Select-Object -First 1).Name) $p }
     }
     @($names | Sort-Object -Unique)
 }
@@ -519,6 +521,13 @@ function Format-Start($s) {
 
 # ---------------- Named settings with Windows defaults (feeds CHANGES.md and Diff) ----------------
 # Default = $null means there's no fixed Windows default (time zone, languages, etc.).
+# -Device means the default varies by PC: Windows picks it from the hardware, manufacturer, or region, or asks
+# during setup. Default is then the usual value on a clean retail install, and defaults.json always records it.
+
+# Named settings Import never resets by writing their registry values: power goes through powercfg, time and
+# region formats follow the locale, and wallpaper and folder locations point at files on the old PC.
+$NoReset = @('Power|*', 'Time and region|*', 'Appearance|Wallpaper', '*|* folder location')
+function Test-NoReset($r) { foreach ($p in $NoReset) { if ("$($r.Cat)|$($r.Name)" -like $p) { return $true } }; $false }
 
 function Get-SettingRows {
     $desk = 'HKCU\Control Panel\Desktop'
@@ -533,8 +542,8 @@ function Get-SettingRows {
     $ss   = "$CV\SearchSettings"
     $rows = New-Object System.Collections.Generic.List[object]
     $script:ReadLog = New-Object System.Collections.Generic.List[string]
-    function Add($cat, $name, $value, $default) {
-        $rows.Add([pscustomobject]@{ Cat = $cat; Name = $name; Value = "$value"; Default = $(if ($null -eq $default) { $null } else { "$default" }); Sources = @($script:ReadLog | Select-Object -Unique) })
+    function Add($cat, $name, $value, $default, [switch]$Device) {
+        $rows.Add([pscustomobject]@{ Cat = $cat; Name = $name; Value = "$value"; Default = $(if ($null -eq $default) { $null } else { "$default" }); Device = [bool]$Device; Sources = @($script:ReadLog | Select-Object -Unique) })
         $script:ReadLog.Clear()
     }
     function Shown($v) { if ($v) { 'Shown' } else { 'Hidden' } }
@@ -569,10 +578,11 @@ function Get-SettingRows {
 
     # Taskbar
     Add 'Taskbar' 'Alignment' $(if ((Or (Get-Reg $adv TaskbarAl) 1) -eq 0) { 'Left' } else { 'Center' }) 'Center'
-    Add 'Taskbar' 'Search' @{ 0 = 'Hidden'; 1 = 'Icon only'; 2 = 'Search box'; 3 = 'Icon and label' }[[int](Or (Get-Reg "$CV\Search" SearchboxTaskbarMode) 2)] 'Search box'
-    Add 'Taskbar' 'Widgets' (Shown ((Or (Get-Reg $adv TaskbarDa) 1) -eq 1)) 'Shown'
+    # Search box vs icon depends on screen size and build; Widgets and Copilot on region, edition, and manufacturer
+    Add 'Taskbar' 'Search' @{ 0 = 'Hidden'; 1 = 'Icon only'; 2 = 'Search box'; 3 = 'Icon and label' }[[int](Or (Get-Reg "$CV\Search" SearchboxTaskbarMode) 2)] 'Search box' -Device
+    Add 'Taskbar' 'Widgets' (Shown ((Or (Get-Reg $adv TaskbarDa) 1) -eq 1)) 'Shown' -Device
     Add 'Taskbar' 'Task View button' (Shown ((Or (Get-Reg $adv ShowTaskViewButton) 1) -eq 1)) 'Shown'
-    Add 'Taskbar' 'Copilot button' (Shown ((Or (Get-Reg $adv ShowCopilotButton) 1) -eq 1)) 'Shown'
+    Add 'Taskbar' 'Copilot button' (Shown ((Or (Get-Reg $adv ShowCopilotButton) 1) -eq 1)) 'Shown' -Device
     $sr = Get-Reg "$CV\Explorer\StuckRects3" Settings
     Add 'Taskbar' 'Auto-hide' (OnOff ($sr -and ($sr[8] -band 1))) 'Off'
     Add 'Taskbar' 'Combine buttons' @{ 0 = 'Always'; 1 = 'When full'; 2 = 'Never' }[[int](Or (Get-Reg $adv TaskbarGlomLevel) 0)] 'Always'
@@ -640,9 +650,10 @@ function Get-SettingRows {
     Add 'System' 'System sounds' (Or $sounds $scheme) 'Windows Default'
     Add 'System' 'Communications ducking' @{ 0 = 'Mute other sounds'; 1 = 'Reduce by 80%'; 2 = 'Reduce by 50%'; 3 = 'Do nothing' }[[int](Or (Get-Reg 'HKCU\Software\Microsoft\Multimedia\Audio' UserDuckingPreference) 1)] 'Reduce by 80%'
     $machine = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion'
-    Add 'System' 'Fast startup' (OnOff ((Or (Get-Reg 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power' HiberbootEnabled) 1) -eq 1)) 'On'
+    # Manufacturers often turn fast startup and the startup sound off
+    Add 'System' 'Fast startup' (OnOff ((Or (Get-Reg 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power' HiberbootEnabled) 1) -eq 1)) 'On' -Device
     Add 'System' 'Hibernate available' (OnOff (Get-HibernateAvailable)) $null
-    Add 'System' 'Startup sound' (OnOff ((Get-Reg "$machine\Authentication\LogonUI\BootAnimation" DisableStartupSound) -ne 1)) 'On'
+    Add 'System' 'Startup sound' (OnOff ((Get-Reg "$machine\Authentication\LogonUI\BootAnimation" DisableStartupSound) -ne 1)) 'On' -Device
     Add 'System' 'Remote Desktop' (OnOff ((Or (Get-Reg 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server' fDenyTSConnections) 1) -eq 0)) 'Off'
     Add 'System' 'Developer Mode' (OnOff ((Get-Reg "$machine\AppModelUnlock" AllowDevelopmentWithoutDevLicense) -eq 1)) 'Off'
     Add 'System' 'Sudo' (OnOff ((Get-Reg "$machine\Sudo" Enabled) -ge 1)) 'Off'
@@ -678,7 +689,7 @@ function Get-SettingRows {
     Add $mk 'Scroll inactive windows on hover' (OnOff ((Or (Get-Reg $desk MouseWheelRouting) 2) -eq 2)) 'On'
     Add $mk 'Key repeat delay' (Or (Get-Reg $kb KeyboardDelay) 1) 1
     Add $mk 'Key repeat rate' (Or (Get-Reg $kb KeyboardSpeed) 31) 31
-    Add $mk 'Num Lock at sign-in' (OnOff ([int64](Or (Get-Reg $kb InitialKeyboardIndicators) 0) -band 2)) 'Off'
+    Add $mk 'Num Lock at sign-in' (OnOff ([int64](Or (Get-Reg $kb InitialKeyboardIndicators) 0) -band 2)) 'Off' -Device   # set by the manufacturer or firmware
     Add $mk 'Print Screen opens Snipping Tool' (OnOff ((Or (Get-Reg $kb PrintScreenKeyForSnippingEnabled) 1) -eq 1)) 'On'
     $hk = @{ '1' = 'Left Alt+Shift'; '2' = 'Ctrl+Shift'; '3' = 'Not assigned'; '4' = 'Grave accent' }
     Add $mk 'Switch input language hotkey' $hk[[string](Or (Get-Reg 'HKCU\Keyboard Layout\Toggle' 'Language Hotkey') '1')] 'Left Alt+Shift'
@@ -708,14 +719,15 @@ function Get-SettingRows {
 
     # Privacy and search
     $pv = 'Privacy and search'
-    Add $pv 'Send optional diagnostic data' (OnOff ((Or (Get-Reg 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' AllowTelemetry) 3) -ge 3)) 'On'
+    # Diagnostic data, advertising ID, tailored experiences, and location are asked during setup, so they vary by PC
+    Add $pv 'Send optional diagnostic data' (OnOff ((Or (Get-Reg 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' AllowTelemetry) 3) -ge 3)) 'On' -Device
     # UAC slider: EnableLUA 0 = off; ConsentPromptBehaviorAdmin 2 = always notify, 5 = notify on app changes, 0 = never; PromptOnSecureDesktop = dim desktop
     $uacKey = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     $cpba = [int](Or (Get-Reg $uacKey ConsentPromptBehaviorAdmin) 5); $posd = [int](Or (Get-Reg $uacKey PromptOnSecureDesktop) 1)
     $uac = if ((Or (Get-Reg $uacKey EnableLUA) 1) -eq 0 -or $cpba -eq 0) { 'Never notify' } elseif ($cpba -eq 2) { 'Always notify' } elseif ($posd -eq 1) { 'Notify on app changes, dim desktop' } else { 'Notify on app changes, no dimming' }
     Add $pv 'User Account Control level' $uac 'Notify on app changes, dim desktop'
-    Add $pv 'Advertising ID' (OnOff ((Or (Get-Reg "$CV\AdvertisingInfo" Enabled) 1) -eq 1)) 'On'
-    Add $pv 'Tailored experiences' (OnOff ((Or (Get-Reg "$CV\Privacy" TailoredExperiencesWithDiagnosticDataEnabled) 1) -eq 1)) 'On'
+    Add $pv 'Advertising ID' (OnOff ((Or (Get-Reg "$CV\AdvertisingInfo" Enabled) 1) -eq 1)) 'On' -Device
+    Add $pv 'Tailored experiences' (OnOff ((Or (Get-Reg "$CV\Privacy" TailoredExperiencesWithDiagnosticDataEnabled) 1) -eq 1)) 'On' -Device
     Add $pv 'Websites can use my language list' (OnOff ((Get-Reg "$intl\User Profile" HttpAcceptLanguageOptOut) -ne 1)) 'On'
     Add $pv 'Track app launches' (OnOff ((Or (Get-Reg $adv Start_TrackProgs) 1) -eq 1)) 'On'
     Add $pv 'Suggested content in Settings' (OnOff ((Or (Get-Reg $cdm 'SubscribedContent-338393Enabled') 1) -eq 1)) 'On'
@@ -724,8 +736,8 @@ function Get-SettingRows {
     Add $pv 'Search highlights' (OnOff ((Or (Get-Reg $ss IsDynamicSearchBoxEnabled) 1) -eq 1)) 'On'
     Add $pv 'Search Microsoft account content' (OnOff ((Or (Get-Reg $ss IsMSACloudSearchEnabled) 1) -eq 1)) 'On'
     $cs = "$CV\CapabilityAccessManager\ConsentStore"
-    Add $pv 'Location services' (Or (Get-Reg 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' Value) 'Allow') 'Allow'
-    Add $pv 'Apps can use location' (Or (Get-Reg "$cs\location" Value) 'Allow') 'Allow'
+    Add $pv 'Location services' (Or (Get-Reg 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' Value) 'Allow') 'Allow' -Device
+    Add $pv 'Apps can use location' (Or (Get-Reg "$cs\location" Value) 'Allow') 'Allow' -Device
     Add $pv 'Apps can use camera' (Or (Get-Reg "$cs\webcam" Value) 'Allow') 'Allow'
     Add $pv 'Apps can use microphone' (Or (Get-Reg "$cs\microphone" Value) 'Allow') 'Allow'
 
@@ -812,9 +824,9 @@ function Write-ChangesReport($rows, $file, $user, $machine, $recorded, [bool]$ha
            "**Optional features turned on ($($onFeatures.Count)):** $($onFeatures -join ', ')", '',
            "**Disabled Microsoft scheduled tasks ($(@($recorded.DisabledTasks).Count)):** $(@($recorded.DisabledTasks) -join ', ')", '',
            "**Other machine policies:** $(@($recorded.Policies).Count) values", '', '</details>', ''
-    $md += '## Still at default', ''
+    $md += '## Still at default', '', 'Saved in `defaults.json`. Import resets these on the new PC only with `OverwriteChangedSettings`, or `ApplyDeviceDefaults` for the ones marked "varies by PC".', ''
     foreach ($g in ($same | Group-Object Cat)) {
-        $md += "**$($g.Name):** " + (($g.Group | ForEach-Object { "$($_.Name) ($($_.Value))" }) -join ', ')
+        $md += "**$($g.Name):** " + (($g.Group | ForEach-Object { "$($_.Name) ($($_.Value)$(if ($_.Device) { ', varies by PC' }))" }) -join ', ')
         $md += ''
     }
     $md | Set-Content $file -Encoding UTF8
@@ -841,6 +853,7 @@ function Write-LongReport($Path) {
     $power = Get-Content "$Path\power.json" -Raw | ConvertFrom-Json
     $sys = Get-Content "$Path\system.json" -Raw | ConvertFrom-Json
     $rec = Get-Content "$Path\recorded.json" -Raw | ConvertFrom-Json
+    $defaults = @(Read-JsonArray "$Path\defaults.json")
     $changed = @($rows | Where-Object { $null -ne $_.Default })
     $info = @($rows | Where-Object { $null -eq $_.Default })
 
@@ -855,7 +868,8 @@ function Write-LongReport($Path) {
             "| 5. Power plan changes | $(@($power.Settings).Count) |",
             "| 6. Time, language, and system | $(4 + @($sys.HostsEntries).Count) |",
             "| 7. Files | $(@(Get-ChildItem "$Path\files" -Recurse -File -EA SilentlyContinue).Count) |",
-            "| 8. Recorded, not applied by default | $(@($rec.Services).Count + @($rec.DisabledTasks).Count + @($rec.Features).Count + @($rec.Policies).Count) |", '')
+            "| 8. Recorded, not applied by default | $(@($rec.Services).Count + @($rec.DisabledTasks).Count + @($rec.Features).Count + @($rec.Policies).Count) |",
+            "| 9. Named settings at default | $(@($defaults).Count) |", '')
 
     $md += '## 1. Named settings changed from default', '', '| Category | Setting | Yours | Default | Registry values it reads |', '|---|---|---|---|---|'
     $md += $changed | ForEach-Object { "| $($_.Cat) | $($_.Name) | $(& $esc $_.Value) | $(& $esc $_.Default) | $((@($_.Sources) | ForEach-Object { '`' + $_.Replace('|', '\') + '`' }) -join '<br>') |" }
@@ -900,6 +914,14 @@ function Write-LongReport($Path) {
     $md += @($rec.Features) | Sort-Object @{ e = { -not $_.Enabled } }, Name | ForEach-Object { "| $($_.Name) | $(if ($_.Enabled) { 'On' } else { 'Off' }) |" }
     $md += '', "### Machine policies ($(@($rec.Policies).Count))", '', '| Key | Value | Type | Data |', '|---|---|---|---|'
     $md += @($rec.Policies) | Sort-Object Key, Name | ForEach-Object { "| ``$($_.Key)`` | $(& $esc $_.Name) | $($_.Kind) | $(& $esc (& $fmt $_.Kind $_.Data)) |" }
+
+    $md += '', '## 9. Named settings at default', '',
+           'The registry values behind each named setting that was at its default. Import writes them only with `OverwriteChangedSettings` (fixed Windows defaults that were changed on the new PC) or `ApplyDeviceDefaults` (defaults that vary by PC). "(missing)" means the value is deleted.', '',
+           '| Category | Setting | Value | Default kind | Registry values |', '|---|---|---|---|---|'
+    $md += foreach ($d in $defaults) {
+        $regs = @($d.Values) | ForEach-Object { '`' + "$($_.Key)\$($_.Name)" + '` = ' + $(if ($_.Missing) { '(missing)' } else { & $esc (& $fmt $_.Kind $_.Data) }) }
+        "| $($d.Cat) | $($d.Name) | $(& $esc $d.Value) | $(if ($d.Device) { 'Varies by PC' } else { 'Windows' }) | $($regs -join '<br>') |"
+    }
 
     $md | Set-Content "$Path\CHANGES_LONG.md" -Encoding UTF8
 }
@@ -956,6 +978,22 @@ if ($Mode -eq 'Export') {
     }
     if ($hive) { Write-Host "  + $added behind named settings you changed = $($user.Count) saved" }
     Save-Json @($user) "$Path\values.json"
+
+    # Named settings still at their default, with the registry values behind them (or a note that a value was missing).
+    # Import uses these only with OverwriteChangedSettings or ApplyDeviceDefaults.
+    $atDefault = foreach ($r in $rows) {
+        if ($null -eq $r.Default -or $r.Value -ne $r.Default -or (Test-NoReset $r)) { continue }
+        $vals = foreach ($s in $r.Sources) {
+            $key, $name = $s -split '\|', 2
+            if ($name -match $SkipValues) { continue }
+            if ($name -eq '(default)') { $name = '' }
+            $v = Read-RegValues $key @($name)
+            if ($v) { $v } else { [pscustomobject]@{ Key = $key; Name = $name; Missing = $true } }
+        }
+        if ($vals) { [pscustomobject]@{ Cat = $r.Cat; Name = $r.Name; Value = $r.Value; Device = $r.Device; Values = @($vals) } }
+    }
+    Save-Json @($atDefault) "$Path\defaults.json"
+    Write-Host "Named settings at default: $(@($atDefault).Count) recorded ($(@($atDefault | Where-Object Device).Count) vary by PC)"
 
     $machine = @(Get-MachineChanges)
     Save-Json @($machine) "$Path\machine.json"
@@ -1021,14 +1059,15 @@ if ($Mode -eq 'Diff') {
 
     Write-Host 'Reading current settings...'
     # Named settings. The backup only holds changed ones, so a missing row means "was at default".
-    $backup = @{}; foreach ($b in @(Read-JsonArray "$Path\settings.json")) { $backup["$($b.Cat)|$($b.Name)"] = $b }
+    # defaults.json has the ones at default, so the backup's real value is known even where defaults vary by PC
+    $backup = @{}; foreach ($b in @(Read-JsonArray "$Path\settings.json") + @(Read-JsonArray "$Path\defaults.json")) { $backup["$($b.Cat)|$($b.Name)"] = $b }
     $named = New-Object System.Collections.Generic.List[object]
     $seen = @{}
     foreach ($l in Get-SettingRows) {
         $id = "$($l.Cat)|$($l.Name)"; $seen[$id] = $true
         $bv = if ($backup.ContainsKey($id)) { $backup[$id].Value } elseif ($null -ne $l.Default) { $l.Default } else { '(not in backup)' }
         if ($bv -ne $l.Value) {
-            $isDef = if ($null -eq $l.Default) { 'n/a' } elseif ($l.Value -eq $l.Default) { 'Yes' } else { 'No' }
+            $isDef = if ($null -eq $l.Default) { 'n/a' } elseif ($l.Device) { 'Varies by PC' } elseif ($l.Value -eq $l.Default) { 'Yes' } else { 'No' }
             $named.Add([pscustomobject]@{ Category = $l.Cat; Setting = $l.Name; Backup = $bv; Current = $l.Value; Default = $isDef })
         }
     }
@@ -1083,7 +1122,7 @@ if ($Mode -eq 'Diff') {
     $esc = { param($s) "$s" -replace '\|', '\|' }
     $md = @('# Settings diff', '',
             "Backup from **$($meta.Computer)** ($($meta.Date)) compared with **$env:COMPUTERNAME** on $(Get-Date -Format 'yyyy-MM-dd h:mm tt'). Nothing was changed.", '',
-            '**Default** = is the current value the Windows default? (n/a = no fixed default)', '')
+            '**Default** = is the current value the Windows default? (n/a = no fixed default; Varies by PC = Windows picks it per PC, and Import copies the old PC''s only with `ApplyDeviceDefaults`)', '')
     $target = Get-TargetName $meta
     $md += "**PC name:** $(if (-not $target) { "Import leaves it as **$env:COMPUTERNAME** (``ComputerName`` isn't set)." } elseif (-not (Test-PcName $target)) { "``ComputerName`` gives **$target**, which isn't a valid PC name, so Import would skip it." } elseif ($target -ieq $env:COMPUTERNAME) { "already **$target**." } else { "Import would rename **$env:COMPUTERNAME** to **$target**." })", ''
     if ($named.Count) {
@@ -1123,8 +1162,9 @@ Stop-Process -Name explorer -Force -EA SilentlyContinue
 Stop-Process -Name StartMenuExperienceHost -Force -EA SilentlyContinue
 Start-Sleep -Seconds 1
 
-$ok = 0; $failed = 0
+$ok = 0; $failed = @()
 foreach ($v in @(Read-JsonArray "$Path\values.json")) {
+    if ($v.Key -like '*\Taskband') { continue }   # the taskbar pin list goes in with its shortcut files, below
     if ($v.Kind -in 'String', 'ExpandString') { $v.Data = Fix-Profile $v.Data }
     if ($v.Kind -eq 'MultiString') { $v.Data = @($v.Data | ForEach-Object { Fix-Profile $_ }) }
     if ($v.Key -eq 'HKCU\Environment') {
@@ -1139,13 +1179,55 @@ foreach ($v in @(Read-JsonArray "$Path\values.json")) {
     if ($v.Key -like '*User Shell Folders' -and -not (Test-Path ([Environment]::ExpandEnvironmentVariables($v.Data)))) {
         Write-Warning "Skipped folder location $($v.Name): $($v.Data) doesn't exist here"; continue
     }
-    try { Write-RegValue $v; $ok++ } catch { $failed++ }
+    try { Write-RegValue $v; $ok++ } catch { $failed += "$($v.Key.Substring(5))\$($v.Name)" }
 }
-Write-Host "User settings: $ok values applied$(if ($failed) { ", $failed couldn't be set" })"
+Write-Host "User settings: $ok values applied"
+# Windows blocks scripts from writing a few values (TaskbarDa, the Widgets button, on recent builds)
+if ($failed) { Write-Warning "Windows didn't allow $($failed.Count) values to be set: $($failed -join ', ')" }
+
+# Named settings the old PC had at their default. Ones with a fixed Windows default are written only with OverwriteChangedSettings,
+# which undoes changes made on this PC.
+# Defaults that vary by PC (search box, Widgets, setup privacy choices) are copied only with ApplyDeviceDefaults.
+$overwriteChanged = Get-ConfigBool 'OverwriteChangedSettings' $false
+$applyDevice = Get-ConfigBool 'ApplyDeviceDefaults' $true
+if (($overwriteChanged -or $applyDevice) -and -not (Test-Path "$Path\defaults.json")) {
+    Write-Warning 'This backup has no defaults.json (an older version made it), so OverwriteChangedSettings and ApplyDeviceDefaults were skipped. Re-run the export on the old PC.'
+} elseif ($overwriteChanged -or $applyDevice) {
+    $now = @{}; foreach ($r in Get-SettingRows) { $now["$($r.Cat)|$($r.Name)"] = $r.Value }
+    $set = @(); $blocked = @(); $needAdmin = @()
+    foreach ($d in @(Read-JsonArray "$Path\defaults.json")) {
+        if (-not $(if ($d.Device) { $applyDevice } else { $overwriteChanged })) { continue }
+        if ($now["$($d.Cat)|$($d.Name)"] -eq $d.Value) { continue }   # this PC already matches
+        if (-not $IsAdmin -and @($d.Values | Where-Object { $_.Key -like 'HKLM\*' })) { $needAdmin += $d.Name; continue }
+        try {
+            foreach ($v in @($d.Values)) {
+                if (-not $v.Missing) { Write-RegValue $v; continue }
+                if (-not (Test-RegKey $v.Key)) { continue }
+                $k = Open-RegKey $v.Key $true; $k.DeleteValue([string]$v.Name, $false); $k.Close()
+            }
+            $set += "$($d.Name) ($($d.Value))"
+        } catch { $blocked += $d.Name }
+    }
+    $which = (@($(if ($overwriteChanged) { 'overwrite changed' }), $(if ($applyDevice) { 'old PC' })) | Where-Object { $_ }) -join ' and '
+    Write-Host "Defaults ($which): $(if ($set) { "$($set.Count) set: $($set -join ', ')" } else { 'nothing to change' })"
+    if ($blocked) { Write-Warning "Windows didn't allow these to be reset: $($blocked -join ', ')" }
+    if ($needAdmin) { Write-Warning "Skipped without admin: $($needAdmin -join ', ')" }
+}
 
 # Pins and Quick access
 if (Test-Path "$Path\files\start2.bin") { New-Item -ItemType Directory -Force $StartPinsDir | Out-Null; Copy-Item "$Path\files\start*.bin" $StartPinsDir -Force; Write-Host 'Restored Start menu pins' }
-if (Test-Path "$Path\files\UserPinned") {
+if ((Test-Path "$Path\files\UserPinned") -and -not (Get-ConfigBool 'DeleteExistingPins' $true)) {
+    Write-Host "Taskbar pins: kept this PC's (DeleteExistingPins is off)"
+} elseif (Test-Path "$Path\files\UserPinned") {
+    # Windows restarts Explorer a second after it's stopped, and a running Explorer overwrites the pin list
+    # with its own. Stop it again right before writing so the backup's pins are what it reads on the restart.
+    Stop-Process -Name explorer -Force -EA SilentlyContinue
+    for ($i = 0; $i -lt 20 -and (Get-Process explorer -EA SilentlyContinue); $i++) { Start-Sleep -Milliseconds 100 }
+    # Clear this PC's pins: its shortcut files and the pin list that points at them
+    Get-ChildItem -LiteralPath $PinnedDir -Recurse -Filter *.lnk -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+    $k = Open-RegKey "$CV\Explorer\Taskband" $true
+    foreach ($n in $k.GetValueNames()) { $k.DeleteValue($n, $false) }
+    $k.Close()
     # Restore a pin only if its app is on this PC. Windows drops pins whose shortcut is missing, so no blank icons.
     $shell = New-Object -ComObject WScript.Shell
     $restored = @(); $missing = @()
@@ -1157,6 +1239,8 @@ if (Test-Path "$Path\files\UserPinned") {
         Copy-Item -LiteralPath $lnk.FullName $dest -Force
         $restored += $lnk.BaseName
     }
+    # Then the pin list, now that the shortcuts it points at are in place
+    foreach ($v in @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' })) { Write-RegValue $v }
     # Store app pins live in the pin list itself; just report the ones not installed
     $fav = @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' -and $_.Name -eq 'Favorites' })[0]
     if ($fav) {
@@ -1284,7 +1368,7 @@ if ($IsAdmin) {
     Write-Warning "Not running as admin: skipped machine-wide settings (fast startup, hibernate, UAC, AutoPlay policy, Remote Desktop, Windows Update options, location services, system locale, hosts file$(if ($ComputerName) { ', PC name' })). Re-run Run-Import.bat and click Yes."
 }
 
-Start-Process explorer
+if (-not (Get-Process explorer -EA SilentlyContinue)) { Start-Process explorer }   # Windows may have restarted it already
 if ($IsAdmin) { Write-Host "`nDone. Restart the PC so everything fully applies." -ForegroundColor Green }
 else { Write-Host "`nDone, but NOT everything was applied: machine-wide settings were skipped because this wasn't run as admin. Run Run-Import.bat and click Yes to finish." -ForegroundColor Yellow }
 

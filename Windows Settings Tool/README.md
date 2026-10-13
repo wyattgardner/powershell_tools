@@ -15,6 +15,7 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 | `WinSettingsBackup\` | Created by export. Holds your saved settings |
 | `WinSettingsBackup\CHANGES.md` | Created by export. Every setting you've changed from the Windows default, and what the default is |
 | `WinSettingsBackup\CHANGES_LONG.md` | Created by export. Every item the backup holds in full detail: registry keys, values, what the Default profile had, why each one was saved, power GUIDs, and the full recorded lists |
+| `WinSettingsBackup\defaults.json` | Created by export. Named settings that were at their default, used by `OverwriteChangedSettings` and `ApplyDeviceDefaults` |
 | `DIFF.md` | Created by Run-Diff. What's different between the backup and this PC |
 | `config.example.psd1` | Default options, with an explanation of each (see below) |
 | `config.psd1` | Your own options, if you create it. Not tracked by git |
@@ -56,6 +57,12 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 - **Everything else under your user account** (folder views, per-app notifications, touchpad, Night light, and so on): compared with the Default user profile, the template Windows copies for every new account. That's why export asks for admin.
 - **Power:** only values you overrode. Windows' own CPU tuning is left alone so it fits the new PC.
 - **Pins, Quick access, time zone, languages:** these have no default, so they're always saved.
+
+### Universal vs device defaults
+
+Most named settings have a **universal default**, the same on every Windows install (file extensions hidden, Sticky Keys shortcut on). A few have a **device default** that Windows picks per PC: search box vs icon (screen size and build), Widgets and Copilot (region, edition, manufacturer), Num Lock at sign-in, fast startup and startup sound (manufacturer), and the privacy questions asked during setup (location, diagnostic data, advertising ID, tailored experiences). Microsoft doesn't publish a full list of which is which, so the device list is kept by hand in the script (settings tagged `-Device`).
+
+Settings you changed from the default always transfer. Settings the old PC had at its default are saved to `defaults.json`. Device ones are applied by default (`ApplyDeviceDefaults`). Universal ones already match on a fresh install, so they're only written when you turn on `OverwriteChangedSettings` to undo changes made on the new PC. Older backups don't have `defaults.json`, so re-export to use them.
 
 ## What doesn't get copied
 
@@ -117,6 +124,9 @@ Anything you leave out keeps its default. Command-line switches override both fi
 | `Logging` | `false` | Saves a transcript of every run to `Logs\` |
 | `BackupPath` | `WinSettingsBackup` | Where the backup goes. Relative paths are next to the script |
 | `IncludeRecorded` | `false` | Import also applies service startup types, disabled scheduled tasks, optional features, and other machine policies |
+| `DeleteExistingPins` | `true` | Import clears this PC's taskbar pins first, so the taskbar matches the backup exactly. `false` keeps this PC's pins and skips the backup's (Windows stores pins as one list, so they can't be merged) |
+| `OverwriteChangedSettings` | `false` | For settings the old PC had at the Windows default, overwrite any that were changed on this PC so it matches the old PC. Does nothing on a fresh install |
+| `ApplyDeviceDefaults` | `true` | For settings whose default varies by PC, copy the old PC's value even where it was that PC's default. Off keeps this PC's own |
 | `ComputerName` | `''` | The PC's name on import. `''` leaves it alone, `'FromBackup'` uses the old PC's name, and anything else is the name to set (1-15 letters, digits, or hyphens, not only digits). Needs admin and takes effect after the restart. Run-Diff says what import would do |
 
 ## Running it manually
