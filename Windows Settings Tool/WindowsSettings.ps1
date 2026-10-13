@@ -6,6 +6,7 @@
             Run as admin (Run-Export.bat does this) so it can compare against the Default user profile.
     Import  Apply a backup to this PC. Run as admin to also apply machine-wide settings.
             Add -IncludeRecorded to also apply services, scheduled tasks, optional features, and other machine policies.
+            -ComputerName renames the PC: 'FromBackup' for the old PC's name, or the name to use. Off by default.
     Diff    Read-only. Compare a backup with this PC's current settings and write DIFF.md next to this script.
 
   Normally run through Run-Export.bat, Run-Import.bat, and Run-Diff.bat.
@@ -14,6 +15,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('Export', 'Import', 'Diff')][string]$Mode,
     [string]$Path,
     [switch]$IncludeRecorded,
+    [string]$ComputerName,   # Import: '' leaves the PC name alone, 'FromBackup' uses the old PC's, anything else is the new name
     [switch]$Log,
     [switch]$Elevated,   # set when the script reopened itself as admin
     [switch]$AutoClose   # count down 5 seconds at the end (P pauses); the .bat files pass this
@@ -37,6 +39,17 @@ if (-not $Path -and $Config.BackupPath) {
     if (-not [IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $ScriptDir $Path }
 }
 if (-not $PSBoundParameters.ContainsKey('IncludeRecorded')) { $IncludeRecorded = Get-ConfigBool 'IncludeRecorded' $false }
+# PC name on import. Off by default: '' leaves it alone. 'FromBackup' uses the name Export
+# saved in meta.json; anything else is the name to set.
+if (-not $PSBoundParameters.ContainsKey('ComputerName')) { $ComputerName = [string]$Config.ComputerName }
+$ComputerName = "$ComputerName".Trim()
+function Get-TargetName($meta) {
+    if (-not $ComputerName) { return $null }
+    if ($ComputerName -eq 'FromBackup') { return "$($meta.Computer)".Trim() }
+    return $ComputerName
+}
+# Windows' rules: 1-15 characters, letters, digits and hyphens, not only digits, no hyphen at either end.
+function Test-PcName($n) { $n -match '^(?!-)(?!\d+$)[A-Za-z0-9-]{1,15}(?<!-)$' }
 # RunAsAdmin (on by default): reopen this script in an admin window when the mode needs it. Exit code 99 tells the .bat it moved on.
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (($Mode -in 'Export', 'Import') -and -not $IsAdmin -and -not $Elevated -and (Get-ConfigBool 'RunAsAdmin' $true)) {
@@ -1071,6 +1084,8 @@ if ($Mode -eq 'Diff') {
     $md = @('# Settings diff', '',
             "Backup from **$($meta.Computer)** ($($meta.Date)) compared with **$env:COMPUTERNAME** on $(Get-Date -Format 'yyyy-MM-dd h:mm tt'). Nothing was changed.", '',
             '**Default** = is the current value the Windows default? (n/a = no fixed default)', '')
+    $target = Get-TargetName $meta
+    $md += "**PC name:** $(if (-not $target) { "Import leaves it as **$env:COMPUTERNAME** (``ComputerName`` isn't set)." } elseif (-not (Test-PcName $target)) { "``ComputerName`` gives **$target**, which isn't a valid PC name, so Import would skip it." } elseif ($target -ieq $env:COMPUTERNAME) { "already **$target**." } else { "Import would rename **$env:COMPUTERNAME** to **$target**." })", ''
     if ($named.Count) {
         $md += "## $($named.Count) named settings differ", '', '| Category | Setting | Backup | Current | Default |', '|---|---|---|---|---|'
         $md += $named | ForEach-Object { "| $($_.Category) | $($_.Setting) | $($_.Backup) | $($_.Current) | $($_.Default) |" }
@@ -1254,8 +1269,19 @@ if ($IsAdmin) {
         foreach ($p in @($rec.Policies)) { try { Write-RegValue $p; $c++ } catch { } }
         Write-Host "Machine policies: $c values applied"
     }
+
+    # PC name, only when ComputerName asks for it
+    $target = Get-TargetName (Get-Content "$Path\meta.json" -Raw | ConvertFrom-Json)
+    if ($target) {
+        if (-not (Test-PcName $target)) { Write-Warning "ComputerName gives '$target', which isn't a valid PC name (1-15 letters, digits or hyphens, not only digits). Left the name as $env:COMPUTERNAME." }
+        elseif ($target -ieq $env:COMPUTERNAME) { Write-Host "PC name: already $target" }
+        else {
+            try { Rename-Computer -NewName $target -Force -WarningAction SilentlyContinue -ErrorAction Stop; Write-Host "PC name: $env:COMPUTERNAME -> $target (after the restart)" }
+            catch { Write-Warning "Couldn't rename the PC to ${target}: $($_.Exception.Message)" }
+        }
+    }
 } else {
-    Write-Warning 'Not running as admin: skipped machine-wide settings (fast startup, hibernate, UAC, AutoPlay policy, Remote Desktop, Windows Update options, location services, system locale, hosts file). Re-run Run-Import.bat and click Yes.'
+    Write-Warning "Not running as admin: skipped machine-wide settings (fast startup, hibernate, UAC, AutoPlay policy, Remote Desktop, Windows Update options, location services, system locale, hosts file$(if ($ComputerName) { ', PC name' })). Re-run Run-Import.bat and click Yes."
 }
 
 Start-Process explorer

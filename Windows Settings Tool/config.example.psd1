@@ -17,4 +17,11 @@
     # Import also applies the recorded items: service startup types, disabled scheduled
     # tasks, optional features, and other machine policies. Check DIFF.md first. Default: $false
     IncludeRecorded = $false
+
+    # The PC's name on import. Needs admin; takes effect after the restart. Default: ''
+    #   ''            leave this PC's name as it is
+    #   'FromBackup'  use the old PC's name (Export always saves it)
+    #   'GAMING-PC'   any other value is the name to set: 1-15 letters, digits or
+    #                 hyphens, not only digits
+    ComputerName    = ''
 }

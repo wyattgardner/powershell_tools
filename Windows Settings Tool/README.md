@@ -67,6 +67,7 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 - Display resolution, refresh rate, and HDR (they depend on the monitor)
 - Installed fonts and language packs (languages are added, but Windows may download the pack)
 - BitLocker, activation, drivers
+- The PC's name, unless you turn on `ComputerName` (see [Options](#options))
 
 ## Step 1: export on the old PC
 
@@ -116,6 +117,8 @@ Anything you leave out keeps its default. Command-line switches override both fi
 | `Logging` | `false` | Saves a transcript of every run to `Logs\` |
 | `BackupPath` | `WinSettingsBackup` | Where the backup goes. Relative paths are next to the script |
 | `IncludeRecorded` | `false` | Import also applies service startup types, disabled scheduled tasks, optional features, and other machine policies |
+| `ComputerName` | `''` | The PC's name on import. `''` leaves it alone, `'FromBackup'` uses the old PC's name, and anything else is the name to set (1-15 letters, digits, or hyphens, not only digits). Needs admin and takes effect after the restart. Run-Diff says what import would do |
+
 ## Running it manually
 
 Open PowerShell in this folder:
@@ -134,7 +137,7 @@ powershell -ExecutionPolicy Bypass -File .\WindowsSettings.ps1 -Mode Import -Inc
 
 Check `DIFF.md` first so you know what that will change.
 
-Add `-Path E:\SomeFolder` to use a different backup folder, or `-Log` to log just that run.
+Add `-Path E:\SomeFolder` to use a different backup folder, `-ComputerName FromBackup` (or `-ComputerName NEW-NAME`) to rename the PC on import, or `-Log` to log just that run.
 
 ## Notes
 
