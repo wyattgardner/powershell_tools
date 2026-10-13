@@ -22,8 +22,10 @@ if ($TestEmail) {
 # --- state ---------------------------------------------------------------------------
 # Issues: what's currently wrong and when it was last emailed.
 # Pending: when each out-of-sync condition was first seen (alerted after $OutOfSyncHours).
+# Ignored: alerts matched by $IgnoreAlerts since the last weekly digest, for the check-in.
+# IgnoredSeen: newest ignored event counted per disk-event ID, so each event counts once.
 function ConvertTo-Hash($o) { $h = @{}; if ($o) { foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value } }; return $h }
-$state = @{ Issues = @{}; Pending = @{}; LastHeartbeat = $null }
+$state = @{ Issues = @{}; Pending = @{}; LastHeartbeat = $null; Ignored = @{}; IgnoredSeen = @{}; LastDigest = $null }
 if (Test-Path $stateFile) {
     try {
         $j = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -31,13 +33,35 @@ if (Test-Path $stateFile) {
         foreach ($k in @($state.Issues.Keys)) { $state.Issues[$k] = ConvertTo-Hash $state.Issues[$k] }
         $state.Pending = ConvertTo-Hash $j.Pending
         $state.LastHeartbeat = $j.LastHeartbeat
+        $state.Ignored = ConvertTo-Hash $j.Ignored
+        foreach ($k in @($state.Ignored.Keys)) { $state.Ignored[$k] = ConvertTo-Hash $state.Ignored[$k] }
+        $state.IgnoredSeen = ConvertTo-Hash $j.IgnoredSeen
+        $state.LastDigest = $j.LastDigest
     } catch { Write-Log "state file unreadable, starting fresh: $($_.Exception.Message)" }
 }
 $pendingNow = @{}       # out-of-sync conditions seen this run; anything not seen again is dropped
 
 $issues  = [ordered]@{}     # key -> @{ Title; Detail }
 $summary = New-Object Collections.Generic.List[string]
-function Add-Issue([string]$Key, [string]$Title, [string]$Detail) { $script:issues[$Key] = @{ Title = $Title; Detail = $Detail } }
+# Every alert has an ID (ALERTS.md lists them all). IDs matching $IgnoreAlerts are never
+# emailed; they're still listed in each email's status section and in the log.
+$ignored = New-Object Collections.Generic.List[string]
+function Test-Ignored([string]$AlertId) { foreach ($p in @($IgnoreAlerts)) { if ($p -and $AlertId -like $p) { return $true } }; return $false }
+# Tally for the weekly digest. Unit is 'event' (disk events, each counted once) or
+# 'check' (a condition, counted once per hourly check it was seen in).
+function Add-IgnoredTally([string]$Id, [string]$Unit, [datetime]$When) {
+    $e = $state.Ignored[$Id]
+    if (-not $e) { $e = @{ Count = 0; Unit = $Unit; First = $When.ToString('o'); Last = $When.ToString('o') }; $state.Ignored[$Id] = $e }
+    $e.Count = [int]$e.Count + 1
+    if ($When -gt [datetime]$e.Last) { $e.Last = $When.ToString('o') }
+    if ($When -lt [datetime]$e.First) { $e.First = $When.ToString('o') }
+}
+function Add-Issue([string]$Key, [string]$AlertId, [string]$Title, [string]$Detail) {
+    if (Test-Ignored $AlertId) { $script:ignored.Add("$AlertId ($Title)"); Add-IgnoredTally $AlertId 'check' $now; return }
+    $script:issues[$Key] = @{ Title = $Title; Detail = $Detail; Alert = $AlertId }
+}
+# "1 problem", "2 problems". Never "problem(s)".
+function Plural([int64]$n, [string]$one, [string]$many = "${one}s") { "$n " + $(if ($n -eq 1) { $one } else { $many }) }
 function Format-Age([timespan]$t) {
     if ($t.TotalDays -ge 2) { "{0:N0} days" -f $t.TotalDays } elseif ($t.TotalHours -ge 1) { "{0:N0} hours" -f $t.TotalHours } else { "{0:N0} minutes" -f $t.TotalMinutes }
 }
@@ -66,7 +90,7 @@ try {
         }
         $crashes = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7024, 7031, 7034; StartTime = $now.AddDays(-1) } -ErrorAction SilentlyContinue |
             Where-Object { $_.Message -match [regex]::Escape($svc.DisplayName) }).Count
-        Add-Issue 'service' "Syncthing service is $($svc.State.ToLower())" ("Service '{0}' is {1} (start type {2}). It crashed {3} time(s) in the last 24 hours.{4}" -f $svc.Name, $svc.State, $svc.StartMode, $crashes, $why)
+        Add-Issue 'service' 'service-stopped' "Syncthing service is $($svc.State.ToLower())" ("Service '{0}' is {1} (start type {2}). It crashed {3} in the last 24 hours.{4}" -f $svc.Name, $svc.State, $svc.StartMode, (Plural $crashes 'time'), $why)
         $summary.Add("Service: $($svc.State)")
     } else {
         $summary.Add("Service: running")
@@ -77,7 +101,7 @@ try {
         $addr = ([string]$gui.address) -replace '^0\.0\.0\.0', '127.0.0.1' -replace '^\[::\]', '127.0.0.1'
         $api = @{ Base = "${scheme}://$addr"; Headers = @{ 'X-API-Key' = [string]$gui.apikey } }
     }
-} catch { Add-Issue 'service-check' "Couldn't check the Syncthing service" $_.Exception.Message }
+} catch { Add-Issue 'service-check' 'service-check' "Couldn't check the Syncthing service" $_.Exception.Message }
 
 function Get-Api([string]$Path, [int]$Timeout = 20) { Invoke-RestMethod "$($api.Base)$Path" -Headers $api.Headers -TimeoutSec $Timeout -UseBasicParsing }
 # Per-folder queries get longer: on a folder with a million-plus files, Syncthing can
@@ -101,7 +125,7 @@ if ($api) {
             if ($d.paused) {
                 $t = Test-Lasting "paused-dev-$id"
                 $summary.Add("Device $($d.name): paused since $($t.Since.ToString('yyyy-MM-dd HH:mm'))")
-                if ($t.Long) { Add-Issue "paused-dev-$id" "Device $($d.name) paused for $(Format-Age ($now - $t.Since))" "Device $($d.name) has been paused since $($t.Since.ToString('yyyy-MM-dd HH:mm')). Nothing syncs with it until it's resumed." }
+                if ($t.Long) { Add-Issue "paused-dev-$id" "device-paused:$($d.name)" "Device $($d.name) paused for $(Format-Age ($now - $t.Since))" "Device $($d.name) has been paused since $($t.Since.ToString('yyyy-MM-dd HH:mm')). Nothing syncs with it until it's resumed." }
                 continue
             }
             if ($connected) { $summary.Add("Device $($d.name): connected"); continue }
@@ -109,13 +133,13 @@ if ($api) {
             if ($stats.$id -and $stats.$id.lastSeen) { $seen = [datetime]$stats.$id.lastSeen }
             if (-not $seen -or $seen.Year -lt 2000) {
                 $summary.Add("Device $($d.name): never seen")
-                Add-Issue "device-$id" "$($d.name) has never connected" "Device $($d.name) ($($id.Substring(0,7))) has never connected to this PC."
+                Add-Issue "device-$id" "device-never-connected:$($d.name)" "$($d.name) has never connected" "Device $($d.name) ($($id.Substring(0,7))) has never connected to this PC."
                 continue
             }
             $age = $now - $seen
             $summary.Add("Device $($d.name): last seen $($seen.ToString('yyyy-MM-dd HH:mm')) ($(Format-Age $age) ago)")
             if ($age.TotalHours -ge $DeviceUnseenHours) {
-                Add-Issue "device-$id" "$($d.name) not seen for $(Format-Age $age)" ("Device {0} ({1}) last connected {2}. Nothing has synced with it since." -f $d.name, $id.Substring(0,7), $seen.ToString('yyyy-MM-dd HH:mm'))
+                Add-Issue "device-$id" "device-unseen:$($d.name)" "$($d.name) not seen for $(Format-Age $age)" ("Device {0} ({1}) last connected {2}. Nothing has synced with it since." -f $d.name, $id.Substring(0,7), $seen.ToString('yyyy-MM-dd HH:mm'))
             }
         }
 
@@ -125,7 +149,7 @@ if ($api) {
                 # Pausing is fine for a while; forgetting to resume isn't.
                 $t = Test-Lasting "paused-$($f.id)"
                 $summary.Add("Folder $label`: paused since $($t.Since.ToString('yyyy-MM-dd HH:mm'))")
-                if ($t.Long) { Add-Issue "paused-$($f.id)" "Folder '$label' paused for $(Format-Age ($now - $t.Since))" "Folder '$label' has been paused since $($t.Since.ToString('yyyy-MM-dd HH:mm')). Nothing in it syncs until it's resumed." }
+                if ($t.Long) { Add-Issue "paused-$($f.id)" "folder-paused:$label" "Folder '$label' paused for $(Format-Age ($now - $t.Since))" "Folder '$label' has been paused since $($t.Since.ToString('yyyy-MM-dd HH:mm')). Nothing in it syncs until it's resumed." }
                 continue
             }
             $fid = [uri]::EscapeDataString($f.id)
@@ -134,8 +158,8 @@ if ($api) {
             $need = [int64]$st.needTotalItems
             $pullErr = if ($st.PSObject.Properties['pullErrors']) { [int]$st.pullErrors } else { 0 }
             $line = "Folder $label`: $($st.state)"
-            if ($need) { $line += ", needs $need item(s)" }
-            if ($pullErr) { $line += ", $pullErr error(s)" }
+            if ($need) { $line += ", needs $(Plural $need 'item')" }
+            if ($pullErr) { $line += ", $(Plural $pullErr 'error')" }
 
             if ($st.state -eq 'error' -or $pullErr -gt 0) {
                 $errs = @((Get-Api "/rest/folder/errors?folder=$fid" $folderTimeout).errors) | Where-Object { $_ } | Select-Object -First 5 | ForEach-Object { "  $($_.path): $($_.error)" }
@@ -143,11 +167,11 @@ if ($api) {
                 $t = Test-Lasting "folder-err-$($f.id)"
                 # A folder in the error state is reported at once; file errors only once they last.
                 if ($st.state -eq 'error' -or $t.Long) {
-                    Add-Issue "folder-err-$($f.id)" "Folder '$label' has errors" ("{0}{1} file(s) can't sync, since {2}.`r`n{3}" -f $msg, $pullErr, $t.Since.ToString('yyyy-MM-dd HH:mm'), ($errs -join "`r`n"))
+                    Add-Issue "folder-err-$($f.id)" "folder-error:$label" "Folder '$label' has errors" ("{0}{1} can't sync, since {2}.`r`n{3}" -f $msg, (Plural $pullErr 'file'), $t.Since.ToString('yyyy-MM-dd HH:mm'), ($errs -join "`r`n"))
                 }
             } elseif ($need -gt 0) {
                 $t = Test-Lasting "folder-need-$($f.id)"
-                if ($t.Long) { Add-Issue "folder-need-$($f.id)" "Folder '$label' out of sync for $(Format-Age ($now - $t.Since))" "This PC still needs $need item(s) ($([math]::Round([int64]$st.needBytes / 1MB)) MB) in '$label', since $($t.Since.ToString('yyyy-MM-dd HH:mm'))." }
+                if ($t.Long) { Add-Issue "folder-need-$($f.id)" "folder-behind:$label" "Folder '$label' out of sync for $(Format-Age ($now - $t.Since))" "This PC still needs $(Plural $need 'item') ($([math]::Round([int64]$st.needBytes / 1MB)) MB) in '$label', since $($t.Since.ToString('yyyy-MM-dd HH:mm'))." }
             }
 
             # How far each connected device is behind on this folder.
@@ -158,7 +182,7 @@ if ($api) {
                 if ([double]$c.completion -lt 100) {
                     $line += ", $($names[$did]) at $([math]::Floor([double]$c.completion))%"
                     $t = Test-Lasting "remote-$($f.id)-$did"
-                    if ($t.Long) { Add-Issue "remote-$($f.id)-$did" "$($names[$did]) behind on '$label'" ("{0} has been below 100% on '{1}' since {2} (now {3:N1}%, {4} item(s) to go)." -f $names[$did], $label, $t.Since.ToString('yyyy-MM-dd HH:mm'), [double]$c.completion, $c.needItems) }
+                    if ($t.Long) { Add-Issue "remote-$($f.id)-$did" "device-behind:$($names[$did]):$label" "$($names[$did]) behind on '$label'" ("{0} has been below 100% on '{1}' since {2} (now {3:N1}%, {4} to go)." -f $names[$did], $label, $t.Since.ToString('yyyy-MM-dd HH:mm'), [double]$c.completion, (Plural $c.needItems 'item')) }
                 }
             }
             $summary.Add($line)
@@ -168,18 +192,32 @@ if ($api) {
                 foreach ($k in @($state.Pending.Keys)) { if ($k -like "*-$($f.id)*") { $pendingNow[$k] = $state.Pending[$k] } }
                 $t = Test-Lasting "folder-api-$($f.id)"
                 $summary.Add("Folder $label`: busy, didn't answer within $folderTimeout s")
-                if ($t.Long) { Add-Issue "folder-api-$($f.id)" "Folder '$label' unreadable for $(Format-Age ($now - $t.Since))" "Syncthing hasn't answered status queries for '$label' since $($t.Since.ToString('yyyy-MM-dd HH:mm')): $($_.Exception.Message)" }
+                if ($t.Long) { Add-Issue "folder-api-$($f.id)" "folder-busy:$label" "Folder '$label' unreadable for $(Format-Age ($now - $t.Since))" "Syncthing hasn't answered status queries for '$label' since $($t.Since.ToString('yyyy-MM-dd HH:mm')): $($_.Exception.Message)" }
             }
         }
-    } catch { Add-Issue 'api' "Couldn't read Syncthing's status" "The service is running but its API at $($api.Base) didn't answer: $($_.Exception.Message)" }
+    } catch { Add-Issue 'api' 'api-unreachable' "Couldn't read Syncthing's status" "The service is running but its API at $($api.Base) didn't answer: $($_.Exception.Message)" }
 }
 
 # --- 3. disks ---------------------------------------------------------------------------------
 if ($CheckDiskErrors) {
     try {
         # Last 24 hours, so the issue clears itself after a clean day.
-        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Level = 1, 2, 3; StartTime = $now.AddDays(-1) } -ErrorAction SilentlyContinue |
+        $all = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Level = 1, 2, 3; StartTime = $now.AddDays(-1) } -ErrorAction SilentlyContinue |
             Where-Object { $DiskEventProviders -contains $_.ProviderName })
+        # Each event type is its own alert ID, disk-event:<provider>:<id>, so harmless ones can be ignored alone
+        $allDiskIgnored = Test-Ignored 'disk-events'
+        $ev = @($all | Where-Object { -not $allDiskIgnored -and -not (Test-Ignored "disk-event:$($_.ProviderName):$($_.Id)") })
+        $ignEv = @($all | Where-Object { $ev -notcontains $_ })
+        $skipped = $ignEv.Count
+        if ($skipped) { $ignored.Add("$(Plural $skipped 'disk event') in the last 24 hours") }
+        # The 24-hour window overlaps between hourly checks, so tally only events newer than the last one counted.
+        foreach ($g in ($ignEv | Group-Object ProviderName, Id)) {
+            $gid = "disk-event:$($g.Group[0].ProviderName):$($g.Group[0].Id)"
+            $seen = if ($state.IgnoredSeen[$gid]) { [datetime]$state.IgnoredSeen[$gid] } else { [datetime]::MinValue }
+            $fresh = @($g.Group | Where-Object { $_.TimeCreated -gt $seen } | Sort-Object TimeCreated)
+            foreach ($x in $fresh) { Add-IgnoredTally $gid 'event' $x.TimeCreated }
+            if ($fresh) { $state.IgnoredSeen[$gid] = $fresh[-1].TimeCreated.ToString('o') }
+        }
         if ($ev) {
             $groups = $ev | Group-Object ProviderName, Id | Sort-Object Count -Descending | ForEach-Object {
                 $first = ($_.Group | Select-Object -Last 1).TimeCreated; $last = ($_.Group | Select-Object -First 1).TimeCreated
@@ -187,17 +225,24 @@ if ($CheckDiskErrors) {
                 if ($msg.Length -gt 220) { $msg = $msg.Substring(0, 220) + '...' }
                 "  {0} event {1}, {2}x ({3:MM-dd HH:mm} to {4:MM-dd HH:mm}): {5}" -f $_.Group[0].ProviderName, $_.Group[0].Id, $_.Count, $first, $last, $msg
             }
-            Add-Issue 'disk-events' "$($ev.Count) disk or file system error(s) in the last 24 hours" ("From the Windows System event log:`r`n{0}`r`n`r`nCheck the disk before trusting it as a sync target. A failing disk syncs its damage to every other device." -f ($groups -join "`r`n"))
+            # Retries (disk 153) and link resets (storahci/stornvme 129) are also what a hard drive
+            # does when it's slow to spin back up after Windows parked it. Say so, so it's not mistaken for a dying disk.
+            $spinUp = if ($ev | Where-Object { ($_.ProviderName -eq 'disk' -and $_.Id -eq 153) -or ($_.ProviderName -in 'storahci', 'stornvme' -and $_.Id -eq 129) }) {
+                "`r`n`r`nPossible false positive: disk 153 (I/O retried) and storahci 129 (reset to device) also happen when a hard drive takes too long to spin back up after Windows turned it off for being idle. If the drive's SMART data is clean and these events come and go, that's the likely cause. See ALERTS.md (disk-event) for how to check and how to ignore them."
+            } else { "" }
+            Add-Issue 'disk-events' 'disk-events' "$(Plural $ev.Count 'disk or file system error') in the last 24 hours" ("From the Windows System event log:`r`n{0}`r`n`r`nCheck the disk before trusting it as a sync target. A failing disk syncs its damage to every other device.{1}" -f ($groups -join "`r`n"), $spinUp)
         }
-        $summary.Add("Disk events (24h): $($ev.Count)")
+        $summary.Add("Disk events (24h): $($ev.Count)$(if ($skipped) { " (+$skipped ignored)" })")
         foreach ($pd in Get-PhysicalDisk) {
             if ($pd.HealthStatus -ne 'Healthy') {
-                Add-Issue "disk-health-$($pd.DeviceId)" "Disk '$($pd.FriendlyName)' is $($pd.HealthStatus)" ("Windows reports {0} ({1:N0} GB) as {2}, operational status {3}." -f $pd.FriendlyName, ($pd.Size / 1GB), $pd.HealthStatus, ($pd.OperationalStatus -join ', '))
+                Add-Issue "disk-health-$($pd.DeviceId)" "disk-health:$($pd.FriendlyName)" "Disk '$($pd.FriendlyName)' is $($pd.HealthStatus)" ("Windows reports {0} ({1:N0} GB) as {2}, operational status {3}." -f $pd.FriendlyName, ($pd.Size / 1GB), $pd.HealthStatus, ($pd.OperationalStatus -join ', '))
             }
             $summary.Add("Disk $($pd.FriendlyName): $($pd.HealthStatus)")
         }
-    } catch { Add-Issue 'disk-check' "Couldn't check the disks" $_.Exception.Message }
+    } catch { Add-Issue 'disk-check' 'disk-check' "Couldn't check the disks" $_.Exception.Message }
 }
+
+if ($ignored.Count) { $summary.Add("Ignored by `$IgnoreAlerts: " + ($ignored -join '; ')) }
 
 # --- 4. decide what to email --------------------------------------------------------------------
 $remindAt = $now.Date.AddHours($ReminderHour)
@@ -213,22 +258,28 @@ foreach ($k in $issues.Keys) {
 }
 foreach ($k in $state.Issues.Keys) { if (-not $issues.Contains($k) -and $state.Issues[$k].LastEmailed) { $fixed += $k } }
 
+# Weekly check-in: sent every week no matter what (other emails, open problems, or nothing
+# to report), so if it ever stops arriving, the monitor itself is broken. Only the
+# check-in resets the weekly timer. $HeartbeatDay = "" turns it off.
 $heartbeatDue = $false
-if ($HeartbeatDay -and -not $issues.Count) {
+if ($HeartbeatDay) {
     $hb = $now.Date.AddHours($HeartbeatHour)
     while ($hb.DayOfWeek -ne $HeartbeatDay -or $hb -gt $now) { $hb = $hb.AddDays(-1) }   # most recent heartbeat time
     $heartbeatDue = (-not $state.LastHeartbeat -or [datetime]$state.LastHeartbeat -lt $hb)
 }
+# The week's ignored alerts go out with every check-in.
+$digestDue = $heartbeatDue -and $state.Ignored.Count -gt 0
 
 $subject = $null
 if ($new) {
-    $subject = "Syncthing: " + $issues[$new[0]].Title + $(if ($new.Count -gt 1) { " (+$($new.Count - 1) more)" })
+    # A brand-new problem leads the subject even when the check-in is due in the same email.
+    $subject = "Syncthing: " + $issues[$new[0]].Title + $(if ($new.Count -gt 1) { " (+$($new.Count - 1) more)" }) + $(if ($heartbeatDue) { " + weekly check-in" })
+} elseif ($heartbeatDue) {
+    $subject = "Syncthing: weekly check-in, " + $(if ($issues.Count) { "$(Plural $issues.Count 'problem') still open" } elseif ($fixed) { "all recovered" } else { "all good" })
 } elseif ($still) {
     $subject = "Still broken: " + $issues[$still[0]].Title + $(if ($still.Count -gt 1) { " (+$($still.Count - 1) more)" })
 } elseif ($fixed) {
     $subject = "Recovered: " + $state.Issues[$fixed[0]].Title + $(if ($fixed.Count -gt 1) { " (+$($fixed.Count - 1) more)" })
-} elseif ($heartbeatDue) {
-    $subject = "Syncthing: all good (weekly check-in)"
 }
 
 $body = New-Object Text.StringBuilder
@@ -239,12 +290,29 @@ if ($ongoing) {
     foreach ($k in $ongoing) { [void]$body.AppendLine("* $($issues[$k].Title) (first reported $(([datetime]$state.Issues[$k].Since).ToString('yyyy-MM-dd HH:mm')))`r`n$($issues[$k].Detail)`r`n") }
 }
 if ($fixed) { [void]$body.AppendLine("RECOVERED"); foreach ($k in $fixed) { [void]$body.AppendLine("* $($state.Issues[$k].Title)") }; [void]$body.AppendLine("") }
-if (-not $issues.Count -and $heartbeatDue) { [void]$body.AppendLine("Nothing wrong this week.`r`n") }
+if ($heartbeatDue) {
+    [void]$body.AppendLine("WEEKLY CHECK-IN")
+    [void]$body.AppendLine("The monitor is running on $machine. This email comes every week, whatever else is going on; if one doesn't arrive, check the 'Syncthing Monitor' scheduled task.")
+    if (-not $issues.Count) { [void]$body.AppendLine($(if ($digestDue) { "Nothing wrong right now, apart from what you've chosen to ignore below." } else { "Nothing wrong right now." })) }
+    [void]$body.AppendLine("")
+}
+$digestSent = $false
+if ($digestDue -and $subject) {
+    $since = if ($state.LastDigest) { ([datetime]$state.LastDigest).ToString('yyyy-MM-dd HH:mm') } else { 'the last check-in' }
+    [void]$body.AppendLine("IGNORED THIS WEEK (`$IgnoreAlerts, since $since)")
+    foreach ($k in ($state.Ignored.Keys | Sort-Object)) {
+        $e = $state.Ignored[$k]
+        $times = if ($e.Unit -eq 'event') { Plural $e.Count 'event' } else { Plural $e.Count 'hourly check' }
+        [void]$body.AppendLine(("  {0}: {1}, {2:ddd MM-dd HH:mm} to {3:ddd MM-dd HH:mm}" -f $k, $times, [datetime]$e.First, [datetime]$e.Last))
+    }
+    [void]$body.AppendLine("  A sudden jump here can be the first sign of a real problem. See ALERTS.md.`r`n")
+    $digestSent = $true
+}
 [void]$body.AppendLine("CURRENT STATUS ($($now.ToString('yyyy-MM-dd HH:mm')))")
 foreach ($l in $summary) { [void]$body.AppendLine("  $l") }
 [void]$body.AppendLine("`r`nReminders while a problem lasts: daily at ${ReminderHour}:00. Weekly check-in: $HeartbeatDay ${HeartbeatHour}:00.")
 
-Write-Log ("check: {0} issue(s){1}" -f $issues.Count, $(if ($issues.Count) { ": " + (($issues.Keys | ForEach-Object { $issues[$_].Title }) -join '; ') } else { "" }))
+Write-Log ("check: {0}{1}{2}" -f (Plural $issues.Count 'issue'), $(if ($issues.Count) { ": " + (($issues.Keys | ForEach-Object { $issues[$_].Title }) -join '; ') } else { "" }), $(if ($ignored.Count) { " ($($ignored.Count) ignored)" } else { "" }))
 if ($DryRun) {
     Write-Host "`n--- DRY RUN: nothing sent, state not saved ---"
     if ($subject) { Write-Host "Would email $AlertTo`nSubject: [$machine] $subject`n`n$($body.ToString())" } else { Write-Host "Nothing to email.`n`n$($body.ToString())" }
@@ -263,11 +331,15 @@ $newIssues = @{}
 foreach ($k in $issues.Keys) {
     $old = $state.Issues[$k]
     $rec = @{ Title = $issues[$k].Title; Since = $(if ($old -and $old.Since) { $old.Since } else { $now.ToString('o') }); LastEmailed = $(if ($old) { $old.LastEmailed } else { $null }) }
-    if ($sent -and ($new -contains $k -or $still -contains $k)) { $rec.LastEmailed = $now.ToString('o') }
+    # A check-in lists every open problem, so it counts as their reminder too.
+    if ($sent -and ($new -contains $k -or $still -contains $k -or $heartbeatDue)) { $rec.LastEmailed = $now.ToString('o') }
     $newIssues[$k] = $rec
 }
 if (-not $sent) { foreach ($k in $fixed) { $newIssues[$k] = $state.Issues[$k] } }    # keep until the "recovered" email goes out
-# Any email proves the monitor is alive, so it counts as the week's check-in.
-$hbOut = if ($sent) { $now.ToString('o') } else { $state.LastHeartbeat }
-[pscustomobject]@{ Issues = $newIssues; Pending = $pendingNow; LastHeartbeat = $hbOut } | ConvertTo-Json -Depth 5 | Set-Content $stateFile -Encoding UTF8
+# Only the check-in itself resets the weekly timer; other emails don't count.
+$hbOut = if ($sent -and $heartbeatDue) { $now.ToString('o') } else { $state.LastHeartbeat }
+# The week's ignored tally restarts once its digest has gone out.
+$ignOut = if ($sent -and $digestSent) { @{} } else { $state.Ignored }
+$digestOut = if ($sent -and $digestSent) { $now.ToString('o') } else { $state.LastDigest }
+[pscustomobject]@{ Issues = $newIssues; Pending = $pendingNow; LastHeartbeat = $hbOut; Ignored = $ignOut; IgnoredSeen = $state.IgnoredSeen; LastDigest = $digestOut } | ConvertTo-Json -Depth 5 | Set-Content $stateFile -Encoding UTF8
 exit 0

@@ -23,6 +23,7 @@ Syncthing fails quietly. A crashed service, a device that stopped connecting, or
 | `set-credential.cmd` | Stores the sending account's app password for this PC, encrypted |
 | `check.cmd` | Runs one check now. `-DryRun` shows what it would email; `-TestEmail` sends a test |
 | `settings.defaults.ps1` | Default settings, with an explanation of each |
+| `ALERTS.md` | Every alert it can send, what each means, and how to turn one off |
 | `settings.ps1` | Your settings: at least the two email addresses. Not tracked by git |
 | `scripts\` | The PowerShell behind the `.cmd` files |
 | `credential-<pc>.bin` | The encrypted app password. Not tracked by git |
@@ -45,13 +46,15 @@ Syncthing fails quietly. A crashed service, a device that stopped connecting, or
 
    If that page says the setting isn't available, 2-Step Verification isn't on yet, or you're signed in as a different account.
 
-3. **Store it.** Run `set-credential.cmd`. An admin window asks for the code (typing is hidden) and saves it. Paste only into that prompt, never into chat or a file.
+3. **Store it.** Run `set-credential.cmd`. An admin window asks for the code and saves it. Spaces are optional, each character shows as `*`, and Ctrl+V pasting works, including over remote desktop. A wrong entry asks again; Esc or Ctrl+C stops without saving. Paste only into that prompt, never into chat or a file.
 
 4. **Test.** Run `check.cmd -TestEmail` from an admin prompt and check the inbox. If it lands in spam, mark it "Not spam" so real alerts don't.
 
 5. **Install.** Run `install.cmd`. It checks the settings and credential are in place, registers the task, and runs a first check.
 
 ## What it checks
+
+Each check has its own alert ID. [ALERTS.md](ALERTS.md) explains every alert, including a common false positive from hard drive spin-up, and how to stop one being emailed with `$IgnoreAlerts`.
 
 | Check | A problem when |
 |---|---|
@@ -71,7 +74,8 @@ The 24-hour waits are there because a big sync can legitimately take hours. A de
 - **New problem:** at the first check that finds it. One email covers everything found in that check.
 - **Still broken:** one reminder a day, at the first check at or after `$ReminderHour` (16:00). Skipped if the last email was under 12 hours ago, so a problem found at 3 PM doesn't get a reminder at 4.
 - **Recovered:** when a problem clears.
-- **All good:** weekly, at the first check at or after `$HeartbeatDay` `$HeartbeatHour` (Saturday 16:00), when nothing's wrong. Any other email that week counts as the check-in.
+- **Weekly check-in:** every week, at the first check at or after `$HeartbeatDay` `$HeartbeatHour` (Saturday 16:00), **no matter what**: whether or not other emails went out that week, and whether or not something is broken. That's what makes silence meaningful: if a check-in doesn't arrive, the monitor itself has stopped. The subject says `all good`, `all recovered`, or how many problems are still open, and the body lists them. If a brand-new problem turns up at check-in time, its own subject comes first, with `+ weekly check-in` after it.
+- **Ignored this week:** every check-in lists the alerts `$IgnoreAlerts` suppressed since the last one: each alert ID, how many times, and first and last seen. Disk events are counted once each; conditions like a paused folder are counted per hourly check. See [ALERTS.md](ALERTS.md).
 
 Every email ends with the current status of the service, each device and folder, and the disks. Subjects start with the PC's name in lowercase, like `[myserver] Syncthing: Laptop not seen for 3 days`.
 
@@ -90,9 +94,29 @@ Defaults are in `settings.defaults.ps1`; override any of them in `settings.ps1`.
 | `$OutOfSyncHours` | `24` | How long a folder can stay behind, paused, or unreadable |
 | `$CheckDiskErrors` | `$true` | Disk and file system error alerts, and disk health |
 | `$DiskEventProviders` | disk, NTFS, storage drivers, WHEA | Event log sources counted as disk errors |
+| `$IgnoreAlerts` | none | Alert IDs never emailed, wildcards allowed. See [ALERTS.md](ALERTS.md). Ignored alerts still show in the status section and the log |
 | `$ReminderHour` | `16` | Hour (24h) for daily reminders |
 | `$HeartbeatDay` / `$HeartbeatHour` | `Saturday` / `16` | Weekly check-in. `$HeartbeatDay = ""` turns it off |
 | `$SyncthingService` / `$SyncthingHome` | auto | The service running `syncthing.exe`, and its `--home` folder |
+
+### Settings for one PC
+
+`settings.ps1` is PowerShell, and `$machine` holds the PC's name in lowercase (the same name as in email subjects and file names). Wrap a setting in an `if` to apply it on one PC only. Anything outside an `if` applies to every PC:
+
+```powershell
+$AlertTo  = "you@example.com"
+$SmtpUser = "alerts.sender@gmail.com"
+
+if ($machine -eq 'my-desktop') {
+    # This PC's hard drive logs harmless retries when it spins up. See ALERTS.md.
+    $IgnoreAlerts = @('disk-event:disk:153', 'disk-event:storahci:129')
+}
+if ($machine -eq 'my-server') {
+    $DeviceUnseenHours = 48
+}
+```
+
+That way one `settings.ps1` serves every PC when the tool folder is synced between them (see [More than one PC](#more-than-one-pc)). A per-PC line overrides the same setting set earlier in the file, so put shared settings first and the `if` blocks after. To check which values a PC ends up with, run `check.cmd -DryRun` on it.
 
 ## How the app password is stored
 
@@ -128,6 +152,7 @@ Syncthing Monitor Tool\
    set-credential.cmd           store the app password
    check.cmd                    one check now (-DryRun, -TestEmail)
    settings.defaults.ps1        default settings
+   ALERTS.md                    every alert, and how to ignore one
    settings.ps1                 your settings (gitignored)
    credential-<pc>.bin          encrypted app password (gitignored)
    state-<pc>.json              current problems, last emails (gitignored)

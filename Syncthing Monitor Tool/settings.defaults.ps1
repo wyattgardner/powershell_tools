@@ -3,6 +3,20 @@
 # To change them: copy settings.defaults.ps1 to settings.ps1 and edit the copy, or
 # put just the lines you change in settings.ps1. Defaults load first, then
 # settings.ps1. settings.ps1 is gitignored, so your addresses are never committed.
+#
+# Settings for one PC only: settings.ps1 is PowerShell, and $machine holds this PC's
+# name in lowercase. Wrap any setting in an if, so one settings.ps1 can serve every
+# PC when the tool folder is synced between them. Lines outside an if apply to all:
+#
+#   $AlertTo  = "you@example.com"
+#   $SmtpUser = "alerts.sender@gmail.com"
+#
+#   if ($machine -eq 'my-desktop') {
+#       $IgnoreAlerts = @('disk-event:disk:153', 'disk-event:storahci:129')
+#   }
+#   if ($machine -eq 'my-server') {
+#       $DeviceUnseenHours = 48
+#   }
 
 # --- Email ---------------------------------------------------------------------------
 
@@ -33,15 +47,29 @@ $CheckDiskErrors = $true
 # Event providers counted as disk errors. Errors and warnings only.
 $DiskEventProviders = @('disk', 'Ntfs', 'Microsoft-Windows-Ntfs', 'stornvme', 'storahci', 'nvme', 'iaStorA', 'iaStorAC', 'iaStorAVC', 'partmgr', 'Microsoft-Windows-WHEA-Logger')
 
+# --- Alerts to ignore ----------------------------------------------------------------------
+
+# Alert IDs that are never emailed. Every alert is on by default; ALERTS.md lists each
+# one with what it means and what to do. Wildcards work. Ignored alerts still show in
+# every email's status section and in the log, so nothing goes completely silent.
+# Examples:
+#   'disk-event:disk:153'        hard drive spin-up retries (see ALERTS.md)
+#   'folder-paused:Archive'      a folder you keep paused on purpose
+#   'device-unseen:Laptop'       a device that's often off
+# To ignore something on one PC only, check $machine (the PC's name in lowercase):
+#   if ($machine -eq 'my-pc') { $IgnoreAlerts = @('disk-event:disk:153') }
+$IgnoreAlerts = @()
+
 # --- When it emails ------------------------------------------------------------------------
 
 # A new problem is emailed at once. While it lasts, one reminder a day, at the first
 # check at or after this hour (24h clock). A "recovered" email is sent when it clears.
 $ReminderHour = 16
 
-# Weekly "all good" email, so silence never goes unnoticed: if these stop arriving,
-# the monitor itself is broken. Sent at the first check at or after this day and
-# hour. $HeartbeatDay = "" turns it off.
+# Weekly check-in email, sent every week no matter what (other emails, open problems,
+# or nothing to report), so silence never goes unnoticed: if one doesn't arrive, the
+# monitor itself is broken. It also lists the week's ignored alerts. Sent at the first
+# check at or after this day and hour. $HeartbeatDay = "" turns it off.
 $HeartbeatDay  = "Saturday"
 $HeartbeatHour = 16
 
