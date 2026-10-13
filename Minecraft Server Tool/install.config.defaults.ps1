@@ -30,9 +30,11 @@ $Heap = "4G"
 # Windows service name. Empty = "minecraft-" plus the server name, lowercased.
 $ServiceName = ""
 
-# Ports. Empty = the first free ones: game from 25565, RCON from 25575.
-$GamePort = ""
-$RconPort = ""
+# Ports. Empty = the first free ones: game from 25565, RCON from 25575, and Bedrock
+# (UDP, for Geyser) from 19132.
+$GamePort    = ""
+$RconPort    = ""
+$BedrockPort = ""
 
 # RCON password. Empty = a random 24-character one.
 $RconPass = ""
@@ -48,7 +50,7 @@ $BuildAndStart = $true
 # Windows Firewall rules letting players in. Players outside your network also
 # need the port forwarded on your router; the installer can't do that.
 $OpenGamePort    = $true
-$OpenBedrockPort = $false    # UDP 19132, only if you'll add Geyser for Bedrock players
+$OpenBedrockPort = $false    # the server's Bedrock port (UDP), only if you'll run Geyser for Bedrock players
 
 # Run install-automation (in-game /update and the maintenance task, following
 # settings.ps1). Set those machine-wide options BEFORE installing; see README.

@@ -121,6 +121,8 @@ if ($existing) {
     if (-not $ServerDir) { $ServerDir = Join-Path "C:\MinecraftServers" $ServerName }
     if ($GamePort) { $usedPorts += [int]$GamePort } else { $GamePort = Get-FreePort 25565 }
     if ($RconPort) { $usedPorts += [int]$RconPort } else { $RconPort = Get-FreePort 25575 }
+    # UDP, for Geyser. Picked now so it's set before Geyser could ever start with 19132.
+    if (-not $BedrockPort) { $BedrockPort = Get-FreeBedrockPort $ServerName }
     if (-not $RconPass) { $RconPass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ }) }
 
     $jar = Get-ChildItem $ServerDir -Filter "spigot*.jar" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -130,7 +132,7 @@ if ($existing) {
     $cfgPath = Join-Path $srvTools "server.config.ps1"
     $text = Get-Content $cfgPath -Raw -Encoding UTF8
     $values = [ordered]@{ ServerName = $ServerName; ServiceName = $ServiceName; ServerDir = $ServerDir; Heap = $Heap
-                          RconPort = "$RconPort"; RconPass = $RconPass; GamePort = "$GamePort" }
+                          RconPort = "$RconPort"; RconPass = $RconPass; GamePort = "$GamePort"; BedrockPort = "$BedrockPort" }
     if ($jar) { $values.JarName = $jar.Name }
     foreach ($k in $values.Keys) {
         $v = $values[$k] -replace '"', '`"'
@@ -139,11 +141,17 @@ if ($existing) {
     $text = $text -replace '(?s)^# TEMPLATE\..*?\r?\n\r?\n', "# Written by install.cmd. Edit freely; re-run install-server.cmd after changing anything.`r`n`r`n"
     Set-Content $cfgPath $text -Encoding utf8 -NoNewline
     Write-Host "  $srvTools"
-    Write-Host "  service $ServiceName, game port $GamePort, RCON port $RconPort, heap $Heap"
+    Write-Host "  service $ServiceName, game port $GamePort, RCON port $RconPort, Bedrock port $BedrockPort (if Geyser), heap $Heap"
     Write-Host "  server files: $ServerDir$(if ($jar) { " (using existing $($jar.Name))" })"
 }
 $s = Get-ServerConfig $ServerName
 $gamePortNow = & { . $args[0]; $GamePort } $s.ConfigPath
+# An older server may have no $BedrockPort: then whatever its Geyser uses, else Bedrock's default.
+function Get-BedrockPortNow { $c = Get-ServerConfig $ServerName; if ($c.BedrockPort) { [int]$c.BedrockPort } elseif ($g = Get-GeyserPort $c.ServerDir) { $g } else { 19132 } }
+function Test-BedrockOpen([int]$port) {
+    @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Minecraft Bedrock*' } |
+        Get-NetFirewallPortFilter | Where-Object { $_.Protocol -eq 'UDP' -and $_.LocalPort -eq "$port" }).Count -gt 0
+}
 
 # --- 3. EULA + service ------------------------------------------------------------------------
 Section "Service"
@@ -167,8 +175,32 @@ function Add-Allow($name, $proto, $port) {
     Write-Host "  added: $name"
 }
 if ($OpenGamePort)    { Add-Allow "Minecraft $gamePortNow ($ServerName)" TCP $gamePortNow }
-if ($OpenBedrockPort) { Add-Allow "Minecraft Bedrock 19132 (Geyser)" UDP 19132 }
+if ($OpenBedrockPort) { $bp = Get-BedrockPortNow; if (Test-BedrockOpen $bp) { Write-Host "  exists: UDP $bp (Bedrock)" } else { Add-Allow "Minecraft Bedrock $bp ($ServerName)" UDP $bp } }
 if (-not $OpenGamePort -and -not $OpenBedrockPort) { Write-Host "  skipped (off in install.config.ps1)" }
+
+# --- 4b. plugins from spigot_plugins.ps1 -----------------------------------------------------------
+# New servers only, before the first start so they load right away. An existing server
+# keeps the plugins it has; install-plugins.cmd adds the list to it on purpose.
+Section "Plugins"
+if ($existing) {
+    Write-Host "  Existing server: left as is. To add the plugins on your list: install-plugins.cmd `"$ServerName`""
+} else {
+    Install-ListedPlugins $s | Out-Null
+}
+# Bedrock players need both the open UDP port and Geyser + Floodgate.
+$pluginNames = @(Get-ChildItem (Join-Path $s.ServerDir "plugins") -Filter *.jar -File -ErrorAction SilentlyContinue |
+    ForEach-Object { (Get-PluginYml $_.FullName).Name })
+$hasGeyser = ($pluginNames -contains 'Geyser-Spigot') -and ($pluginNames -contains 'floodgate')
+$bp = Get-BedrockPortNow
+if ($OpenBedrockPort -and -not $hasGeyser) {
+    Write-Host "  UDP $bp is open for Bedrock players, but they also need Geyser and Floodgate. They're in" -ForegroundColor Yellow
+    Write-Host "  spigot_plugins.example.ps1: copy them into spigot_plugins.ps1, then install-plugins.cmd `"$ServerName`"." -ForegroundColor Yellow
+} elseif ($hasGeyser -and -not (Test-BedrockOpen $bp)) {
+    Write-Host "  Geyser is installed on UDP $bp, but that port isn't open, so Bedrock players can't connect yet." -ForegroundColor Yellow
+    Write-Host "  Set `$OpenBedrockPort = `$true in install.config.ps1 and run install.cmd again." -ForegroundColor Yellow
+} elseif ($hasGeyser) {
+    Write-Host "  Bedrock players connect on UDP port $bp."
+}
 
 # --- 5. build and start ---------------------------------------------------------------------------
 if ($BuildAndStart) {

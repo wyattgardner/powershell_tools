@@ -110,6 +110,15 @@ if ($changed) {
     Write-Host "server.properties: set $($changed -join ', ')$(if ((Get-Service $ServiceName).Status -eq 'Running') { ' (restart the server to apply)' })."
 }
 
+# --- Geyser's Bedrock port ---------------------------------------------------------------------
+# Only when this server has a $BedrockPort and Geyser: Geyser's config follows server.config.ps1.
+. (Join-Path $toolsDir "_lib.ps1")
+$geyserPort = Get-GeyserPort $ServerDir
+if ($BedrockPort -and $null -ne $geyserPort -and $geyserPort -ne [int]$BedrockPort) {
+    Set-GeyserPort $ServerDir ([int]$BedrockPort)
+    Write-Host "Geyser: Bedrock port $geyserPort -> $BedrockPort$(if ((Get-Service $ServiceName).Status -eq 'Running') { ' (restart the server to apply)' })."
+}
+
 # --- firewall ---------------------------------------------------------------------------------
 # RCON listens on all interfaces and the protocol is unencrypted. Block beats Allow in
 # Windows Firewall, so this wins over any broad java.exe Allow rule; LAN still works.
@@ -127,7 +136,7 @@ $eula = Join-Path $ServerDir "eula.txt"
 if (-not (Test-Path $eula) -or -not (Select-String -Path $eula -Pattern '^eula=true' -Quiet)) {
     $todo += "accept the Minecraft EULA: eula=true in $eula (https://aka.ms/MinecraftEULA)"
 }
-$todo += "allow players in: inbound TCP $GamePort in Windows Firewall (plus UDP 19132 if you run Geyser), and port-forward it on your router for internet play"
+$todo += "allow players in: inbound TCP $GamePort in Windows Firewall (plus UDP $(if ($BedrockPort) { $BedrockPort } else { '19132' }) if you run Geyser), and port-forward it on your router for internet play"
 $todo += "register '$serverDirLocal\shutdown-gp.ps1' as a Group Policy shutdown script, Parameters EMPTY (README: Shutdown scripts)"
 $todo += "run install-automation.ps1 (elevated) so this server gets /update and maintenance"
 

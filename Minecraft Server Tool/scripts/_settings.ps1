@@ -10,6 +10,14 @@ $logDir     = Join-Path $toolRoot "logs"          # tool-wide logs (per-server l
 $userSettings = Join-Path $toolRoot "settings.ps1"
 if (Test-Path $userSettings) { . $userSettings }
 
+# Optional plugin list (spigot_plugins.ps1; see spigot_plugins.example.ps1). Without
+# it, nothing is installed. Its sources join $PluginSources, so whatever the list
+# installs also updates. A plugin in both keeps its $PluginSources entry.
+$SpigotPlugins = [ordered]@{}
+$pluginList = Join-Path $toolRoot "spigot_plugins.ps1"
+if (Test-Path $pluginList) { . $pluginList }
+foreach ($k in @($SpigotPlugins.Keys)) { if (-not $PluginSources.Contains($k)) { $PluginSources[$k] = $SpigotPlugins[$k] } }
+
 # Warn if settings.defaults.ps1 has been edited instead of settings.ps1. Only
 # detectable in a git checkout: compares it to the last commit. Silent when git
 # isn't installed or this isn't a repo. Once per script run.

@@ -10,10 +10,12 @@ Windows services, using [NSSM](https://nssm.cc).
 - Optional daily maintenance: updates, a warning to players, a restart, and
   optionally Windows updates and a reboot.
 - A console window with the live log where you can type commands, no admin needed.
+- Optional plugin list: new servers get your plugins, and they update with everything
+  else.
 
 Everything machine-specific lives in files you own: `settings.ps1` for the machine,
-`install.config.ps1` for the installer, and `server.config.ps1` for each server. None
-are tracked by git.
+`install.config.ps1` for the installer, `spigot_plugins.ps1` for your plugin list, and
+`server.config.ps1` for each server. None are tracked by git.
 
 
 ## Requirements
@@ -35,10 +37,12 @@ and a JDK 25 via winget if you don't have one.
    [Moving the tools folder](#moving-the-tools-folder)).
 2. Optional: change machine-wide settings first, like Windows updates, reboots, or
    the maintenance time. See [Settings](#settings).
-3. Run **`install.cmd`**. The first run creates `install.config.ps1` and opens it.
-4. Set at least `$ServerName` and `$AcceptEula = $true`, save, and run
+3. Optional: pick plugins. Copy `spigot_plugins.example.ps1` to `spigot_plugins.ps1`
+   and edit it. See [Plugins](#plugins). Skip this and no plugins are installed.
+4. Run **`install.cmd`**. The first run creates `install.config.ps1` and opens it.
+5. Set at least `$ServerName` and `$AcceptEula = $true`, save, and run
    **`install.cmd`** again. It asks for admin and takes a few minutes.
-5. Register the shutdown script when it asks you to (see below). It's the one step
+6. Register the shutdown script when it asks you to (see below). It's the one step
    the installer can't do for you.
 
 That's it. The server is running, starts with Windows, and has `console.cmd`,
@@ -57,10 +61,11 @@ steps that didn't complete, without touching its config.
 3. Accepts the EULA, installs the Windows service, sets up `server.properties` for
    RCON, and blocks the RCON port from the internet.
 4. Adds firewall rules so players can connect.
-5. Builds Spigot with BuildTools, starts the server, and checks it came up.
-6. Sets up `/update` and daily maintenance, following your settings.
-7. Makes shortcuts.
-8. Opens the Group Policy editor for the shutdown script.
+5. Installs the plugins on your `spigot_plugins.ps1` list (new servers only).
+6. Builds Spigot with BuildTools, starts the server, and checks it came up.
+7. Sets up `/update` and daily maintenance, following your settings.
+8. Makes shortcuts.
+9. Opens the Group Policy editor for the shutdown script.
 
 Everything is logged to `logs\install.log`.
 
@@ -76,11 +81,12 @@ All in `install.config.ps1`. Empty values mean "pick for me".
 | `$Heap` | `4G` | Server memory. 6-8G for bigger worlds or more players. |
 | `$ServiceName` | `minecraft-<name>` | Windows service name |
 | `$GamePort` / `$RconPort` | first free from 25565 / 25575 | Ports |
+| `$BedrockPort` | first free from 19132 | UDP port for Bedrock players, used only if the server runs Geyser. Written into Geyser's config, so two servers with Geyser don't clash |
 | `$RconPass` | random | RCON password |
 | `$InstallJava` | `$true` | Install Temurin JDK 25 with winget if no JDK is found |
 | `$BuildAndStart` | `$true` | Build Spigot and start the server at the end |
 | `$OpenGamePort` | `$true` | Firewall rule for the game port |
-| `$OpenBedrockPort` | `$false` | Firewall rule for UDP 19132, if you'll add Geyser |
+| `$OpenBedrockPort` | `$false` | Firewall rule for the server's Bedrock port (UDP), for Bedrock players. They also need Geyser and Floodgate (see [Plugins](#plugins)) |
 | `$InstallAutomation` | `$true` | Set up `/update` and maintenance |
 | `$DesktopShortcuts` | `$true` | `Desktop\Minecraft Servers\<name>\` with console, start, stop, update |
 | `$StartupConsole` | `$false` | Open the console window at every login |
@@ -88,6 +94,40 @@ All in `install.config.ps1`. Empty values mean "pick for me".
 
 Everything about a server can be changed later in its `server.config.ps1`; run
 `install-server.cmd "<name>"` afterwards to apply it.
+
+### Plugins
+
+Optional. Without a plugin list, the tool installs no plugins other than its own
+`/update` plugin, and you add plugin jars to a server's `plugins\` folder yourself.
+
+To have it install them: copy `spigot_plugins.example.ps1` to `spigot_plugins.ps1`
+and edit it. The example is a working list (Geyser, Floodgate, ViaVersion,
+ViaBackwards, DriveBackupV2) with a comment on what each does, so you can keep it,
+trim it, or empty it. Each entry is keyed by the `name:` in the plugin's
+`plugin.yml` and says where to download it, in the same format as `$PluginSources`
+(see [Which plugins update](#which-plugins-update)).
+
+- **New servers:** `install.cmd` installs the list before the first start.
+- **Existing servers:** `install-plugins.cmd "<name>"` installs the list on that
+  server. New plugins load at its next restart. Re-running `install.cmd` or
+  `install-server.cmd` for an existing server never adds plugins, so a server
+  only gets the list when you ask.
+- **Never overwrites:** a plugin is only installed if no jar in `plugins\` has its
+  name, whatever version is there. Nothing is replaced or downgraded.
+- **Updates:** every plugin on the list joins `$PluginSources`, so it updates with
+  `update.cmd`, `/update`, and maintenance, from the same source.
+
+**Geyser on more than one server:** Geyser listens on UDP 19132 by default, and two
+servers can't share it; the second one's Geyser fails to start. So when the list
+installs Geyser, the server gets its own `$BedrockPort` (the first free one from
+19132) in `server.config.ps1`, and the tool writes it into Geyser's config before
+Geyser first starts. Bedrock players add that server with that port. To change it
+later, edit `$BedrockPort` and run `install-server.cmd "<name>"`, then restart.
+
+Downloads get the same checks as updates: SHA-256 from GeyserMC, SHA-512 from
+Modrinth, and a valid-jar check for CI builds. Plugins only on SpigotMC or Hangar
+can't be downloaded automatically. The example lists those commented out, with
+the page to download them from by hand.
 
 ### The shutdown script
 
@@ -107,8 +147,9 @@ down or rebooting.
 ### Playing over the internet
 
 The installer opens the game port in Windows Firewall, which covers your own
-network. For friends elsewhere, forward the game port (TCP, plus UDP 19132 for
-Geyser) on your router to this PC. **Never forward the RCON port.**
+network. For friends elsewhere, forward the game port (TCP, plus the server's
+Bedrock port, UDP, if it runs Geyser) on your router to this PC. **Never forward
+the RCON port.**
 
 ## Everyday use
 
@@ -154,7 +195,7 @@ is what a dedicated, always-on server box might use.
 | `$AutoUpdateModrinthPlugins` | `$true` | Update any plugin from Modrinth, found by file hash | same |
 | `$UpdateCountdownSeconds` | `60` | In-game warning before an update restart (skipped if nobody's on) | same |
 | `$InGameUpdateCommand` | `$true` | Install the `/update` plugin (ops only) | same |
-| `$PluginSources` | Geyser, Floodgate, ViaVersion, ViaBackwards, DriveBackupV2 | Which plugins auto-update, and from where | same |
+| `$PluginSources` | Geyser, Floodgate, ViaVersion, ViaBackwards, DriveBackupV2, plus your `spigot_plugins.ps1` list | Which plugins auto-update, and from where | same |
 | `$MaintenanceEnabled` | `$true` | Scheduled maintenance task | same |
 | `$MaintenanceDay` / `$MaintenanceTime` | `Daily` / `05:00` | When it runs | same |
 | `$MaintenanceWarnMinutes` | `15, 5, 1` | In-game warnings before the restart | same |
@@ -214,7 +255,9 @@ is never installed over a newer one. Turn it off with `$AutoUpdateModrinthPlugin
 
 **Plugins listed in `$PluginSources`**, matched by the `name:` in each jar's
 `plugin.yml`. This is for plugins that aren't on Modrinth, or where another source
-is better. The list takes priority over the Modrinth lookup.
+is better. The list takes priority over the Modrinth lookup. Everything on your
+`spigot_plugins.ps1` list is added to it automatically, so whatever the tool
+installed, it also updates. A plugin in both keeps its `$PluginSources` entry.
 
 | Kind | Source | Checked by |
 |---|---|---|
@@ -226,8 +269,9 @@ Plugins from SpigotMC's resource pages or Hangar can't be updated automatically:
 neither offers a way to look a jar up by hash. Update those by hand, or list them in
 `$PluginSources` if they also publish to Modrinth or a CI server.
 
-To add a plugin to the list, copy the whole `$PluginSources` block into
-`settings.ps1` and add an entry of the matching kind.
+To have a plugin installed as well as updated, add it to `spigot_plugins.ps1`
+(see [Plugins](#plugins)). To only update one you add by hand, copy the whole
+`$PluginSources` block into `settings.ps1` and add an entry of the matching kind.
 
 ### What gets checksum-verified
 
@@ -275,7 +319,7 @@ everything else but never reboots.
 - **Version jumps**: automatic, to `<ServerDir>\manual backups\`, as above.
 - **Everything else**: bring your own. [DriveBackupV2](https://modrinth.com/plugin/drivebackupv2)
   works well (local zips, plus Google Drive/OneDrive/FTP if you want) and is in the
-  default `$PluginSources`. Schedule its backups before maintenance runs. Its
+  default `$PluginSources` and the example plugin list. Schedule its backups before maintenance runs. Its
   schedule uses a fixed UTC offset, so it shifts an hour across daylight saving.
 
 ## Adding more servers
@@ -300,11 +344,13 @@ the address doesn't change.
 <tools folder>\
    install.cmd                       set up a server (start here)
    install-server.cmd                re-apply a server's server.config.ps1
+   install-plugins.cmd               install your plugin list on an existing server
    install-automation.cmd            re-apply settings: /update, maintenance, Windows Update
    status.cmd                        what's about to happen
    maintenance.cmd                   run maintenance now (-DryRun to rehearse)
    install.config.defaults.ps1       install options (copied to install.config.ps1)
    settings.defaults.ps1             machine settings (copy to settings.ps1 to change)
+   spigot_plugins.example.ps1        example plugin list (copy to spigot_plugins.ps1 to use)
    scripts\                          the PowerShell behind the .cmd files
    bin\                              nssm.exe, mcrcon.exe (downloaded by install.cmd)
    lan-console\                      console from another PC; copy the whole folder
@@ -319,7 +365,7 @@ the address doesn't change.
          minecraft.log start.log shutdown.log update.log
 ```
 
-Your files (`settings.ps1`, `install.config.ps1`, `servers\`) and everything
+Your files (`settings.ps1`, `install.config.ps1`, `spigot_plugins.ps1`, `servers\`) and everything
 downloaded or generated (`bin\`, `logs\`, `BuildTools\`) are gitignored.
 
 ## Logs and crashes

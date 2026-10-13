@@ -34,6 +34,11 @@ $RconPass    = "CHANGE ME"
 # Game port. Must be unique. 25565 is Minecraft's default; use 25566, 25567... for more servers.
 $GamePort    = "25565"
 
+# Bedrock port (UDP), used only if the server runs Geyser. Must be unique. 19132 is
+# Bedrock's default; the installer picks 19133, 19134... for more servers, and writes
+# it into Geyser's config. Empty = picked when Geyser is installed.
+$BedrockPort = ""
+
 # Logs live beside this config. Leave these as-is.
 $ServerLog   = Join-Path $PSScriptRoot "minecraft.log"
 $StartLog    = Join-Path $PSScriptRoot "start.log"

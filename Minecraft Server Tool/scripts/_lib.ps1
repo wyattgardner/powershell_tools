@@ -23,6 +23,7 @@ function Get-ServerConfig([string]$Name) {
             RconHost    = $RconHost
             RconPort    = $RconPort
             RconPass    = $RconPass
+            BedrockPort = $BedrockPort
             ServerLog   = $ServerLog
             ConfigPath  = $args[0]
         }
@@ -232,6 +233,134 @@ function Save-PluginDownload([string]$Name, $remote) {
     # keep the 3 newest cached builds per plugin
     Get-ChildItem $pluginCacheDir -Filter "$Name-*.jar" | Sort-Object LastWriteTime -Descending | Select-Object -Skip 3 | Remove-Item -Force
     return $dest
+}
+
+# --- Bedrock port (Geyser) ---------------------------------------------------------
+# Geyser listens on UDP 19132 unless told otherwise, so a second server with Geyser
+# can't start it. Each server gets its own $BedrockPort, written into Geyser's config.
+# Geyser only writes its config at first start, so before that a 2-line seed is enough:
+# Geyser keeps the port and fills in everything else (tested with config-version 9).
+
+function Get-GeyserConfigPath([string]$ServerDir) { Join-Path $ServerDir "plugins\Geyser-Spigot\config.yml" }
+
+# The port in Geyser's config (the `port:` under `bedrock:`), or $null.
+function Get-GeyserPort([string]$ServerDir) {
+    $f = Get-GeyserConfigPath $ServerDir
+    if (-not (Test-Path $f)) { return $null }
+    $inBedrock = $false
+    foreach ($l in Get-Content $f -Encoding UTF8) {
+        if ($l -match '^bedrock:') { $inBedrock = $true; continue }
+        if ($inBedrock -and $l -match '^\S') { break }
+        if ($inBedrock -and $l -match '^\s+port:\s*(\d+)') { return [int]$matches[1] }
+    }
+    return $null
+}
+
+# Sets that port, leaving the rest of the file as it is; seeds the file if Geyser
+# hasn't written one yet. Takes effect at the server's next start.
+function Set-GeyserPort([string]$ServerDir, [int]$Port) {
+    $f = Get-GeyserConfigPath $ServerDir
+    $utf8 = New-Object Text.UTF8Encoding $false
+    if (-not (Test-Path $f)) {
+        New-Item -ItemType Directory (Split-Path $f) -Force | Out-Null
+        [IO.File]::WriteAllLines($f, [string[]]@("bedrock:", "  port: $Port"), $utf8)
+        return
+    }
+    $lines = [Collections.Generic.List[string]](Get-Content $f -Encoding UTF8)
+    $inBedrock = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^bedrock:') { $inBedrock = $true; continue }
+        if ($inBedrock -and $lines[$i] -match '^\S') { break }
+        if ($inBedrock -and $lines[$i] -match '^(\s+port:\s*)\d+(.*)$') {
+            $lines[$i] = "$($matches[1])$Port$($matches[2])"
+            [IO.File]::WriteAllLines($f, [string[]]$lines, $utf8)
+            return
+        }
+    }
+    throw "No bedrock port setting found in $f"
+}
+
+# Bedrock ports other servers use: their $BedrockPort, what their Geyser config says,
+# and anything already listening on UDP on this PC.
+function Get-UsedBedrockPorts([string]$ExceptFolder) {
+    $used = @()
+    foreach ($o in Get-AllServers) {
+        if ($o.Folder -eq $ExceptFolder) { continue }
+        if ($o.BedrockPort) { $used += [int]$o.BedrockPort }
+        $g = Get-GeyserPort $o.ServerDir
+        if ($g) { $used += $g }
+    }
+    $used += @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.LocalPort })
+    return $used
+}
+
+function Get-FreeBedrockPort([string]$ExceptFolder) {
+    $used = Get-UsedBedrockPorts $ExceptFolder
+    $p = 19132
+    while ($used -contains $p) { $p++ }
+    return $p
+}
+
+# Sets $Name = "value" in a server.config.ps1, adding the line if an older config
+# doesn't have it yet.
+function Set-ServerConfigValue([string]$ConfigPath, [string]$Name, [string]$Value) {
+    $text = Get-Content $ConfigPath -Raw -Encoding UTF8
+    $rx = "(?m)^\`$$Name(\s*)=\s*`"[^`"]*`""
+    if ($text -match $rx) { $text = [regex]::Replace($text, $rx, { param($m) "`$$Name$($m.Groups[1].Value)= `"$Value`"" }) }
+    else { $text = $text.TrimEnd() + "`r`n`r`n# Bedrock port (UDP) for Geyser. Must be unique per server.`r`n`$$Name = `"$Value`"`r`n" }
+    Set-Content $ConfigPath $text -Encoding utf8 -NoNewline
+}
+
+# Makes sure a server with Geyser has its own Bedrock port, in its config and in
+# Geyser's. Returns the port.
+function Set-ServerBedrockPort($cfg) {
+    $port = if ($cfg.BedrockPort) { [int]$cfg.BedrockPort } else { Get-FreeBedrockPort $cfg.Folder }
+    if (-not $cfg.BedrockPort -and $cfg.ConfigPath) {
+        Set-ServerConfigValue $cfg.ConfigPath 'BedrockPort' "$port"
+        Write-Host "  Bedrock port: $port (saved in server.config.ps1)"
+    }
+    if ((Get-GeyserPort $cfg.ServerDir) -ne $port) { Set-GeyserPort $cfg.ServerDir $port; Write-Host "  Geyser set to UDP port $port" }
+    return $port
+}
+
+# Installs the plugins on the spigot_plugins.ps1 list that this server doesn't have,
+# with the same downloads and checks as updates. A plugin counts as present if any jar
+# in plugins\ has its name in plugin.yml, whatever its version, so nothing is ever
+# overwritten or downgraded. New jars load at the server's next start. Returns the
+# names installed.
+function Install-ListedPlugins($cfg) {
+    if (-not $SpigotPlugins -or $SpigotPlugins.Count -eq 0) { Write-Host "  no spigot_plugins.ps1 list; nothing to install"; return @() }
+    $dir = Join-Path $cfg.ServerDir "plugins"
+    New-Item -ItemType Directory $dir -Force | Out-Null
+    $have = @{}
+    foreach ($jar in Get-ChildItem $dir -Filter *.jar -File -ErrorAction SilentlyContinue) {
+        $y = Get-PluginYml $jar.FullName
+        if ($y -and $y.Name) { $have[$y.Name] = "$($y.Version), $($jar.Name)" }
+    }
+    $state = Get-PluginState $cfg
+    $added = @()
+    foreach ($name in $SpigotPlugins.Keys) {
+        if ($have.ContainsKey($name)) { Write-Host "  $($name): already installed ($($have[$name]))"; continue }
+        try {
+            $remote = Get-PluginRemote $name
+            $dest = Join-Path $dir $remote.FileName
+            if (Test-Path $dest) { Write-Host "  $($name): skipped, $($remote.FileName) exists but isn't $name" -ForegroundColor Yellow; continue }
+            $cached = Save-PluginDownload $name $remote
+            Copy-Item $cached $dest
+            $sha = Get-Sha256 $dest
+            if ($sha -ne (Get-Sha256 $cached)) { Remove-Item $dest -Force; throw "the copy doesn't match the download" }
+            # Recorded like an update, so CI builds (no checksum published) are known later.
+            $state[$name] = @{ Build = $remote.Build; Sha256 = $sha; File = $remote.FileName }
+            $added += $name
+            Write-Host "  $($name): installed $($remote.Label)" -ForegroundColor Green
+        } catch { Write-Host "  $($name): couldn't install: $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    if ($added) { Save-PluginState $cfg $state }
+    # A newly installed Geyser gets this server's own Bedrock port before its first start.
+    if ($added -contains 'Geyser-Spigot') {
+        try { Set-ServerBedrockPort $cfg | Out-Null } catch { Write-Host "  Couldn't set Geyser's port: $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    return $added
 }
 
 # Every auto-updatable plugin installed on this server and whether it needs updating.

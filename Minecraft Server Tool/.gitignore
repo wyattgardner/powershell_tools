@@ -8,6 +8,7 @@
 # Your settings
 /settings.ps1
 /install.config.ps1
+/spigot_plugins.ps1
 /lan-console/lan-console.config.ps1
 
 # Generated
