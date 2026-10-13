@@ -471,8 +471,25 @@ function Get-PowerChanges($pw) {
     }
 }
 
+# Opens a hive file privately (no mount point under HKU). Used when reg load is refused.
+if (-not ('WinSettingsHive' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using Microsoft.Win32; using Microsoft.Win32.SafeHandles;
+public static class WinSettingsHive {
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegLoadAppKey(string file, out IntPtr key, int sam, int options, int reserved);
+    public static RegistryKey LoadApp(string file) {
+        IntPtr h;
+        int rc = RegLoadAppKey(file, out h, 0x20019, 0, 0);   // KEY_READ
+        if (rc != 0) throw new System.ComponentModel.Win32Exception(rc);
+        return RegistryKey.FromHandle(new SafeRegistryHandle(h, true));
+    }
+}
+'@
+}
+
 # Load a copy of the Default user profile (what every new account starts from) to compare against
-# Returns the mounted name, or a string starting with "!" that explains why it couldn't
+# Returns the hive's root key, or a string starting with "!" that explains why it couldn't
 function Mount-DefaultHive {
     if (-not $IsAdmin) { return '!Not running as admin.' }
     if (Test-Path "Registry::HKEY_USERS\$DefaultHive") { cmd /c "reg unload HKU\$DefaultHive >nul 2>&1" }   # left over from a crashed run
@@ -485,16 +502,19 @@ function Mount-DefaultHive {
         Copy-Item -LiteralPath $src $copy -Force
         foreach ($log in 'LOG1', 'LOG2') { if (Test-Path -LiteralPath "$src.$log") { Copy-Item -LiteralPath "$src.$log" "$copy.$log" -Force } }
         $out = cmd /c "reg load HKU\$DefaultHive `"$copy`" 2>&1"
-        if ($LASTEXITCODE -eq 0) { return $DefaultHive }
+        if ($LASTEXITCODE -eq 0) { return [Microsoft.Win32.Registry]::Users.OpenSubKey($DefaultHive) }
         $errors += "copy: $(($out | Out-String).Trim())"
+        # Some builds refuse every reg load ("filename or extension is too long" on 25H2 26200.9457), but a private load of the copy still works
+        try { return [WinSettingsHive]::LoadApp($copy) } catch { $errors += "private copy: $($_.Exception.Message)" }
     } catch { $errors += "copy: $($_.Exception.Message)" }
     # Fall back to the original. It's only read, then unloaded.
     $out = cmd /c "reg load HKU\$DefaultHive `"$src`" 2>&1"
-    if ($LASTEXITCODE -eq 0) { return $DefaultHive }
+    if ($LASTEXITCODE -eq 0) { return [Microsoft.Win32.Registry]::Users.OpenSubKey($DefaultHive) }
     $errors += "original: $(($out | Out-String).Trim())"
     "!Couldn't load the Default user profile ($($errors -join '; '))."
 }
-function Dismount-DefaultHive {
+function Dismount-DefaultHive($root) {
+    if ($root -is [Microsoft.Win32.RegistryKey]) { $root.Close() }   # a private hive unloads when its last key closes
     [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     cmd /c "reg unload HKU\$DefaultHive >nul 2>&1"
     Remove-Item "$env:TEMP\winsettings_default.dat*" -Force -EA SilentlyContinue
@@ -513,7 +533,7 @@ function Get-UserChanges($hive) {
         foreach ($k in $keys) {
             $kp = $k.Name -replace '^HKEY_CURRENT_USER', 'HKCU'
             if ($kp -match $SkipKeys) { continue }
-            $bk = if ($hive) { [Microsoft.Win32.Registry]::Users.OpenSubKey("$hive\" + $kp.Substring(5)) } else { $null }
+            $bk = if ($hive) { $hive.OpenSubKey($kp.Substring(5)) } else { $null }
             foreach ($name in $k.GetValueNames()) {
                 if ($name -match $SkipValues) { continue }
                 if ($src[3] -and $src[3] -notcontains $name) { continue }
@@ -1017,8 +1037,8 @@ if ($Mode -eq 'Export') {
     Write-Host 'Comparing your settings with the Default user profile...'
     $hive = Mount-DefaultHive
     $user = @()
-    if ($hive -notlike '!*') {
-        try { $user = @(Get-UserChanges $hive) } finally { Dismount-DefaultHive }
+    if ($hive -isnot [string]) {
+        try { $user = @(Get-UserChanges $hive) } finally { Dismount-DefaultHive $hive }
         Write-Host "  $($user.Count) found by comparing with the template"
     } else {
         Write-Warning "$($hive.Substring(1)) Saving every user value instead of only your changes. $(if (-not $IsAdmin) { 'Run Run-Export.bat and click Yes for a changes-only backup.' })"
