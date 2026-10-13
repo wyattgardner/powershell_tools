@@ -1,0 +1,7 @@
+# Your settings: email addresses
+/settings.ps1
+
+# Per PC: encrypted app password, check state, logs
+/credential-*.bin
+/state-*.json
+/logs/
