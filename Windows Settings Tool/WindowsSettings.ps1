@@ -230,10 +230,11 @@ function Get-MachineList {
         @{ Key = $wu; Name = 'RestartNotificationsAllowed2'; Default = 0 }
         @{ Key = $wu; Name = 'AllowMUUpdateService'; Default = 0 }
     )
-    # Device-level privacy switches (location services, camera access, etc.)
+    # Device-level privacy switches (location services, camera access, etc.). Presence sensing defaults to Allow
+    # or Deny depending on the hardware, so it's always saved.
     $cs = "$m\CapabilityAccessManager\ConsentStore"
     foreach ($c in @(Get-ChildItem -LiteralPath "Registry::$cs" -EA SilentlyContinue)) {
-        if ($null -ne $c.GetValue('Value')) { $list += @{ Key = "$cs\$($c.PSChildName)"; Name = 'Value'; Default = 'Allow' } }
+        if ($null -ne $c.GetValue('Value')) { $list += @{ Key = "$cs\$($c.PSChildName)"; Name = 'Value'; Default = $(if ($c.PSChildName -eq 'humanPresence') { '*' } else { 'Allow' }) } }
     }
     $list
 }
@@ -317,6 +318,50 @@ function Read-RegValues($key, $names) {
 # The useful part of an error: .NET calls from PowerShell wrap the real message in "Exception calling ..."
 function Get-ErrorText($err) { $e = $err.Exception; if ($e.InnerException) { $e.InnerException.Message } else { $e.Message } }
 
+# Where to change values Windows won't let scripts write, by value name
+$ProtectedHints = @{ 'TaskbarDa' = 'Settings > Personalization > Taskbar > Widgets' }
+# Saved values a policy on this PC already enforces, so there's nothing to write (or diff): Widgets hidden by policy
+function Test-PolicyCovers($v) {
+    $v.Name -eq 'TaskbarDa' -and "$($v.Data)" -eq '0' -and (Get-Reg 'HKLM\SOFTWARE\Policies\Microsoft\Dsh' AllowNewsAndInterests) -eq 0
+}
+# Windows' error for a failed registry write, plus what it means when it's access denied. On a user value that
+# means Windows' User Choice Protection Driver (recent builds) guards it, and only Settings can change it.
+function Get-WriteErrorText($v, $err) {
+    $msg = Get-ErrorText $err
+    $e = $err.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    if ($e -isnot [UnauthorizedAccessException] -and $e -isnot [Security.SecurityException]) { return $msg }
+    if ($v.Key -like 'HKLM\*' -and -not $IsAdmin) { return "$msg This needs admin: re-run Run-Import.bat and click Yes." }
+    $where = if ($ProtectedHints.ContainsKey([string]$v.Name)) { $ProtectedHints[[string]$v.Name] } else { 'Settings' }
+    "$msg Windows protects this value from scripts, so it can't be copied. Change it by hand in $where."
+}
+
+# A failed write, spelled out: which setting, its current and imported values (label and raw), and why.
+# The named-setting lookups are built on the first failure only, since reading every setting takes a few seconds.
+$script:FailLookup = $null
+function Format-WriteFailure($v, $err) {
+    if (-not $script:FailLookup) {
+        $now = @{}; $src = @{}
+        foreach ($r in @(Get-SettingRows)) { $now["$($r.Cat)|$($r.Name)"] = $r.Value; foreach ($s in $r.Sources) { if (-not $src.ContainsKey($s)) { $src[$s] = $r } } }
+        $was = @{}; foreach ($b in @(Read-JsonArray "$Path\settings.json") + @(Read-JsonArray "$Path\defaults.json")) { $was["$($b.Cat)|$($b.Name)"] = $b.Value }
+        $script:FailLookup = @{ Now = $now; Src = $src; Was = $was }
+    }
+    $raw = { param($d) $t = Norm $d; if ($t.Length -gt 40) { $t.Substring(0, 37) + '...' } else { $t } }
+    $cur = (Read-RegValues $v.Key @([string]$v.Name)).Data
+    $curRaw = if ($null -eq $cur) { 'value not set' } else { & $raw $cur }
+    $newRaw = if ($v.Missing) { 'value not set' } else { & $raw $v.Data }
+    $path = "$($v.Key.Substring(5))\$(if ($v.Name -eq '') { '(default)' } else { $v.Name })"
+    $r = $script:FailLookup.Src["$($v.Key)|$(if ($v.Name -eq '') { '(default)' } else { $v.Name })"]
+    if ($r) {
+        $id = "$($r.Cat)|$($r.Name)"
+        $label = "$($r.Cat) > $($r.Name)"
+        $values = "Current: $($script:FailLookup.Now[$id]) ($curRaw). Imported: $(Or $script:FailLookup.Was[$id] '?') ($newRaw)."
+    } else {
+        $label = "$(Or $v.Area 'Saved') value"
+        $values = "Current: $curRaw. Imported: $newRaw."
+    }
+    "$label ($path)`n    $values`n    $(Get-WriteErrorText $v $err)"
+}
+
 # Writes through .NET so odd key names (brackets, $, *) and default values ("") work
 function Write-RegValue($v) {
     if ($v.Kind -notin 'String', 'ExpandString', 'Binary', 'DWord', 'QWord', 'MultiString') { return }
@@ -331,6 +376,19 @@ function Write-RegValue($v) {
     $k = Open-RegKey $v.Key $true
     $k.SetValue([string]$v.Name, $data, [Microsoft.Win32.RegistryValueKind]$v.Kind)
     $k.Close()
+}
+
+# CloudStore settings (Night Light and similar) carry their own timestamp, and Windows keeps whichever copy is
+# newest. A backup's copy is always older than this PC's, so it would be put back. Restamp it to now (base64 in and out).
+function Update-CloudStoreStamp($data, [long]$t = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) {
+    [byte[]]$b = [Convert]::FromBase64String($data)
+    $head = [byte[]](0x43, 0x42, 0x01, 0x00, 0x0A, 0x02, 0x01, 0x00, 0x2A, 0x06)   # then the Unix time as a varint
+    if ($b.Length -lt 16) { return $data }
+    for ($i = 0; $i -lt $head.Length; $i++) { if ($b[$i] -ne $head[$i]) { return $data } }
+    $j = 10; while ($j -lt $b.Length -and ($b[$j] -band 0x80)) { $j++ }; $j++
+    $enc = New-Object System.Collections.Generic.List[byte]
+    do { $x = [byte]($t -band 0x7F); $t = $t -shr 7; if ($t) { $x = $x -bor 0x80 }; $enc.Add($x) } while ($t)
+    [Convert]::ToBase64String([byte[]]($b[0..9] + $enc.ToArray() + $b[$j..($b.Length - 1)]))
 }
 
 # PowerShell 5.1's ConvertFrom-Json emits a JSON array as one object, so unroll it
@@ -584,7 +642,9 @@ function Get-SettingRows {
     Add 'Taskbar' 'Alignment' $(if ((Or (Get-Reg $adv TaskbarAl) 1) -eq 0) { 'Left' } else { 'Center' }) 'Center'
     # Search box vs icon depends on screen size and build; Widgets and Copilot on region, edition, and manufacturer
     Add 'Taskbar' 'Search' @{ 0 = 'Hidden'; 1 = 'Icon only'; 2 = 'Search box'; 3 = 'Icon and label' }[[int](Or (Get-Reg "$CV\Search" SearchboxTaskbarMode) 2)] 'Search box' -Device
-    Add 'Taskbar' 'Widgets' (Shown ((Or (Get-Reg $adv TaskbarDa) 1) -eq 1)) 'Shown' -Device
+    # A policy that turns Widgets off hides the button whatever TaskbarDa says
+    $widgetsOff = (Get-Reg 'HKLM\SOFTWARE\Policies\Microsoft\Dsh' AllowNewsAndInterests) -eq 0
+    Add 'Taskbar' 'Widgets' (Shown ((-not $widgetsOff) -and (Or (Get-Reg $adv TaskbarDa) 1) -eq 1)) 'Shown' -Device
     Add 'Taskbar' 'Task View button' (Shown ((Or (Get-Reg $adv ShowTaskViewButton) 1) -eq 1)) 'Shown'
     Add 'Taskbar' 'Copilot button' (Shown ((Or (Get-Reg $adv ShowCopilotButton) 1) -eq 1)) 'Shown' -Device
     $sr = Get-Reg "$CV\Explorer\StuckRects3" Settings
@@ -1067,11 +1127,14 @@ if ($Mode -eq 'Diff') {
     $backup = @{}; foreach ($b in @(Read-JsonArray "$Path\settings.json") + @(Read-JsonArray "$Path\defaults.json")) { $backup["$($b.Cat)|$($b.Name)"] = $b }
     $named = New-Object System.Collections.Generic.List[object]
     $seen = @{}
+    # Options the redesigned Start menu dropped. Import still copies them, but a difference there isn't one you'd see.
+    $OlderStartOnly = @('Start|Layout'); $olderStart = @()
     foreach ($l in Get-SettingRows) {
         $id = "$($l.Cat)|$($l.Name)"; $seen[$id] = $true
         $bv = if ($backup.ContainsKey($id)) { $backup[$id].Value } elseif ($null -ne $l.Default) { $l.Default } else { '(not in backup)' }
-        if ($bv -ne $l.Value) {
-            $isDef = if ($null -eq $l.Default) { 'n/a' } elseif ($l.Device) { 'Varies by PC' } elseif ($l.Value -eq $l.Default) { 'Yes' } else { 'No' }
+        if ($bv -ne $l.Value -and $id -in $OlderStartOnly) { $olderStart += "$($l.Name) (backup: $bv, this PC: $($l.Value))" }
+        elseif ($bv -ne $l.Value) {
+            $isDef =if ($null -eq $l.Default) { 'n/a' } elseif ($l.Device) { 'Varies by PC' } elseif ($l.Value -eq $l.Default) { 'Yes' } else { 'No' }
             $named.Add([pscustomobject]@{ Category = $l.Cat; Setting = $l.Name; Backup = $bv; Current = $l.Value; Default = $isDef })
         }
     }
@@ -1083,10 +1146,12 @@ if ($Mode -eq 'Diff') {
     $raw = New-Object System.Collections.Generic.List[object]
     $prof = { param($s) $s = "$s"; if ($oldProfile) { $s = $s.Replace($oldProfile, '%USERPROFILE%') }; $s.Replace($env:USERPROFILE, '%USERPROFILE%') }
     foreach ($v in @(Read-JsonArray "$Path\values.json")) {
-        if ($NoisyAreas -contains $v.Area) { continue }
+        if ($NoisyAreas -contains $v.Area -or (Test-PolicyCovers $v)) { continue }
         $k = Open-RegKey $v.Key
         $cur = if ($k) { $d = $k.GetValue($v.Name, $null, 'DoNotExpandEnvironmentNames'); $k.Close(); if ($null -ne $d) { & $prof (Norm $d) } } else { $null }
         $bk = & $prof (Norm $v.Data)
+        # CloudStore copies always differ by their timestamp, so compare them without it
+        if ($cur -and $v.Key -like '*\CloudStore\Store\*' -and $v.Kind -eq 'Binary') { $cur = Update-CloudStoreStamp $cur 0; $bk = Update-CloudStoreStamp $bk 0 }
         if ($bk -ne $cur) { $raw.Add([pscustomobject]@{ Value = "$($v.Area): $($v.Key.Substring(5))\$($v.Name)"; Backup = (& $trim $bk); Current = (& $trim (Or $cur '(missing)')) }) }
     }
     # Machine-wide values with defaults
@@ -1133,6 +1198,7 @@ if ($Mode -eq 'Diff') {
         $md += "## $($named.Count) named settings differ", '', '| Category | Setting | Backup | Current | Default |', '|---|---|---|---|---|'
         $md += $named | ForEach-Object { "| $($_.Category) | $($_.Setting) | $($_.Backup) | $($_.Current) | $($_.Default) |" }
     } else { $md += '## All named settings match the backup' }
+    if ($olderStart) { $md += '', "Also different, but only the older Start menu has these options, so they do nothing with the redesigned Start: Start > $($olderStart -join '; ')." }
     $md += '', "## $($raw.Count) other saved values differ", '', 'Values the backup restores that don''t have simple labels. Folder views are left out because they change every time you browse.', ''
     if ($raw.Count) {
         $md += '| Value | Backup | Current |', '|---|---|---|'
@@ -1166,9 +1232,11 @@ Stop-Process -Name explorer -Force -EA SilentlyContinue
 Stop-Process -Name StartMenuExperienceHost -Force -EA SilentlyContinue
 Start-Sleep -Seconds 1
 
-$ok = 0; $failed = @()
+$ok = 0; $failed = @(); $cloudWritten = @()
 foreach ($v in @(Read-JsonArray "$Path\values.json")) {
     if ($v.Key -like '*\Taskband') { continue }   # the taskbar pin list goes in with its shortcut files, below
+    if (Test-PolicyCovers $v) { continue }
+    if ($v.Key -like '*\CloudStore\Store\*' -and $v.Kind -eq 'Binary') { $v.Data = Update-CloudStoreStamp $v.Data; $cloudWritten += $v }
     if ($v.Kind -in 'String', 'ExpandString') { $v.Data = Fix-Profile $v.Data }
     if ($v.Kind -eq 'MultiString') { $v.Data = @($v.Data | ForEach-Object { Fix-Profile $_ }) }
     if ($v.Key -eq 'HKCU\Environment') {
@@ -1183,10 +1251,9 @@ foreach ($v in @(Read-JsonArray "$Path\values.json")) {
     if ($v.Key -like '*User Shell Folders' -and -not (Test-Path ([Environment]::ExpandEnvironmentVariables($v.Data)))) {
         Write-Warning "Skipped folder location $($v.Name): $($v.Data) doesn't exist here"; continue
     }
-    try { Write-RegValue $v; $ok++ } catch { $failed += "$($v.Key.Substring(5))\$($v.Name): $(Get-ErrorText $_)" }
+    try { Write-RegValue $v; $ok++ } catch { $failed += Format-WriteFailure $v $_ }
 }
 Write-Host "User settings: $ok values applied"
-# Some values are protected on recent builds (TaskbarDa, the Widgets button, gives "access is not allowed")
 if ($failed) { Write-Warning "Couldn't set $($failed.Count) values:`n  $($failed -join "`n  ")" }
 
 # Named settings the old PC had at their default. Ones with a fixed Windows default are written only with OverwriteChangedSettings,
@@ -1210,7 +1277,7 @@ if (($overwriteChanged -or $applyDevice) -and -not (Test-Path "$Path\defaults.js
                 $k = Open-RegKey $v.Key $true; $k.DeleteValue([string]$v.Name, $false); $k.Close()
             }
             $set += "$($d.Name) ($($d.Value))"
-        } catch { $blocked += "$($d.Name): $(Get-ErrorText $_)" }
+        } catch { $blocked += Format-WriteFailure $v $_ }
     }
     $which = (@($(if ($overwriteChanged) { 'overwrite changed' }), $(if ($applyDevice) { 'old PC' })) | Where-Object { $_ }) -join ' and '
     Write-Host "Defaults ($which): $(if ($set) { "$($set.Count) set: $($set -join ', ')" } else { 'nothing to change' })"
@@ -1245,7 +1312,7 @@ if ((Test-Path "$Path\files\UserPinned") -and -not (Get-ConfigBool 'DeleteExisti
     }
     # Then the pin list, now that the shortcuts it points at are in place
     foreach ($v in @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' })) {
-        try { Write-RegValue $v } catch { Write-Warning "Couldn't write the taskbar pin list ($($v.Name)): $(Get-ErrorText $_)" }
+        try { Write-RegValue $v } catch { Write-Warning "Couldn't write the taskbar pin list: $(Format-WriteFailure $v $_)" }
     }
     # Store app pins live in the pin list itself; just report the ones not installed
     $fav = @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' -and $_.Name -eq 'Favorites' })[0]
@@ -1375,6 +1442,16 @@ if ($IsAdmin) {
 }
 
 if (-not (Get-Process explorer -EA SilentlyContinue)) { Start-Process explorer }   # Windows may have restarted it already
+# Windows can put back its own copy of CloudStore settings, so check they stuck once Explorer is running again
+if ($cloudWritten) {
+    Start-Sleep -Seconds 5
+    $reverted = @($cloudWritten | Where-Object { (Read-RegValues $_.Key @([string]$_.Name)).Data -ne $_.Data })
+    if ($reverted) { Write-Warning "Windows put back its own copy of $($reverted.Count) value(s), so set these by hand: $(($reverted | ForEach-Object { if ($_.Area -eq 'NightLight') { 'Night light (Settings > System > Display > Night light)' } else { "$($_.Area) ($($_.Key.Substring(5)))" } }) -join '; ')" }
+}
+# Newer builds (seen on 26H2) keep Night light strength outside the registry and ignore the value written above
+if (@($cloudWritten | Where-Object Area -eq 'NightLight').Count) {
+    Write-Host 'Check Night light by hand: newer Windows builds ignore the copied strength and schedule. Match the old PC in Settings > System > Display > Night light.' -ForegroundColor Yellow
+}
 if ($IsAdmin) { Write-Host "`nDone. Restart the PC so everything fully applies." -ForegroundColor Green }
 else { Write-Host "`nDone, but NOT everything was applied: machine-wide settings were skipped because this wasn't run as admin. Run Run-Import.bat and click Yes to finish." -ForegroundColor Yellow }
 

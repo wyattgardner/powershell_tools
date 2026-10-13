@@ -23,7 +23,7 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 
 ## What gets copied
 
-**Appearance:** wallpaper (the image itself) and fit, dark/light mode, transparency, animation effects, accent color, theme, cursors, lock screen (Spotlight or your own picture), screen saver, Night light, per-monitor scaling.
+**Appearance:** wallpaper (the image itself) and fit, dark/light mode, transparency, animation effects, accent color, theme, cursors, lock screen (Spotlight or your own picture), screen saver, Night light (on Windows 11 26H2 and later, Import copies it but Windows ignores it, so set strength and schedule by hand), per-monitor scaling.
 
 **Taskbar:** alignment, auto-hide, Widgets/Task View/Copilot/search buttons, combine buttons, badges, clock seconds, End task, pinned apps, tray icon visibility.
 
