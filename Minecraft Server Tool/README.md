@@ -378,13 +378,22 @@ port-forward RCON.
 
 ## Moving the tools folder
 
-The services, scheduled tasks, shutdown scripts, and any shortcuts point at the
-tools folder. After moving or renaming it:
+The services (including the `nssm.exe` they run), scheduled tasks, shutdown
+scripts, and any shortcuts point at the tools folder. To move it, or to switch to
+a fresh copy such as a new clone:
 
 1. Stop the servers (`stop.cmd`).
-2. Run `install-server.cmd "<name>"` for each server.
-3. Run `install-automation.cmd`.
-4. Update the shutdown script paths in gpedit, and fix any shortcuts.
+2. If you're switching to a copy rather than moving the folder, bring your own
+   files across: `settings.ps1`, `install.config.ps1`, `servers\`, `bin\`, and
+   `lan-console\lan-console.config.ps1`.
+3. Run `install-server.cmd "<name>"` for each server. It also points the service
+   at the new folder's `nssm.exe`.
+4. Run `install-automation.cmd`.
+5. Start the servers (`start.cmd` in each server's new folder).
+6. Update the shutdown script paths in gpedit, and fix any shortcuts.
+
+Only delete the old folder once nothing runs from it: the services hold its
+`nssm.exe` open until they restart.
 
 ## Credits
 

@@ -70,13 +70,16 @@ if (-not (Get-Service $ServiceName -ErrorAction SilentlyContinue)) { & $nssm ins
 # Do NOT enable AppRotate*. With rotation on, NSSM 2.24 silently abandons its
 # restart when the app exits. Proven by A/B test. Spigot rotates its own logs.
 
-# NSSM writes ImagePath unquoted; if the tools folder has a space in its path, an
-# unquoted service path will not start.
+# The service runs nssm.exe itself, from whichever tools folder installed it. `nssm set`
+# never changes that, so after moving the tools folder the service would still run the
+# old folder's nssm.exe. Point it at this folder's, quoted: NSSM writes ImagePath
+# unquoted, and an unquoted path with a space in it won't start.
 $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 $img = (Get-ItemProperty $key).ImagePath
-if ($img -notmatch '^"') {
-    Set-ItemProperty -Path $key -Name ImagePath -Value "`"$img`"" -Type ExpandString
-    Write-Host "Quoted ImagePath."
+if ($img -ne "`"$nssm`"") {
+    Set-ItemProperty -Path $key -Name ImagePath -Value "`"$nssm`"" -Type ExpandString
+    if ($img.Trim('"') -ne $nssm) { Write-Host "Service now runs $nssm (was $img). Takes effect at its next start." }
+    else { Write-Host "Quoted ImagePath." }
 }
 
 # --- log4j2.xml ------------------------------------------------------------------------
