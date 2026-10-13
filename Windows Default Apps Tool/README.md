@@ -87,24 +87,33 @@ UserChoiceLatest is controlled by 2 Windows feature flags:
 Turn both off with [ViVeTool](https://github.com/thebookisclosed/ViVe/releases), a free open-source tool for Windows feature flags. Do this yourself; it disables a Windows protection, so it's your call:
 
 1. Download the latest `ViVeTool-v*-IntelAmd.zip` from the releases page (`ARM64CLR` for ARM PCs) and extract it, for example to `Downloads\ViVeTool`.
-2. Right-click Start, choose **Terminal (Admin)**, and go to that folder. In PowerShell: `cd $env:USERPROFILE\Downloads\ViVeTool`. In Command Prompt: `cd /d %USERPROFILE%\Downloads\ViVeTool`.
-3. Run:
-   ```
+2. Right-click Start and choose **Terminal (Admin)**. If it opens Command Prompt, type `powershell` first. Then:
+   ```powershell
+   cd $env:USERPROFILE\Downloads\ViVeTool
    .\ViVeTool.exe /disable /id:43229420,27623730
    ```
-   It should say it set the configuration successfully. In Command Prompt, leave off the `.\`.
-4. Restart.
-5. Run `Run-Import.bat`. If it sets types without opening Settings, it worked.
+   It should say it set the configuration successfully.
+3. Restart.
+4. Run `Run-Import.bat`. If it sets types without opening Settings, it worked.
 
-To undo it, run this and restart. The flags go back to whatever Microsoft's rollout says:
+Even with the flags off, http, https, `.pdf`, `.htm`, and `.html` stay protected by the driver and have to be set in Settings.
 
-```
-.\ViVeTool.exe /reset /id:43229420,27623730
-```
+### Leave the flags off after importing
 
-Choices you already have keep working either way. Windows updates can turn the flags back on by themselves, so check again after a big update. Even with the flags off, http, https, `.pdf`, `.htm`, and `.html` stay protected by the driver and have to be set in Settings.
+Choices Import writes directly only work while UserChoiceLatest is off. Turning it back on brings back whatever was set when it first turned on (usually during setup), and there's no known way to carry your imported choices over. Tested on Windows 11 26H2 (build 26300):
 
-Background: [UserChoiceLatest: Microsoft's new protection for file type associations](https://kolbi.cz/blog/2025/04/20/userchoicelatest-microsofts-new-protection-for-file-type-associations/) (Christoph Kolbicz, who reverse-engineered it).
+- **ViVeTool `/enable` (or Microsoft turning the flags back on):** Windows goes back to the old `UserChoiceLatest` keys. Media types went back to Media Player, web types and `.pdf` to Edge, and types with no choice at setup (`.7z`, `.iso`, `.py`) lost their app entirely. Your choices stay in the `UserChoice` keys, unused.
+- **ViVeTool `/reset`:** removes the override and leaves the flags at the build's built-in default, which on 26H2 is off. Nothing changes right away. UserChoiceLatest was on only because Microsoft's staged rollout turned it on for that PC, and that rollout can turn it back on later.
+- **Resetting the migration marker** (`HashVersion` under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\SystemProtectedUserData\<your SID>\AnyoneRead\AppDefaults`, set back to 0 so Windows migrates again): published as a fix, but on 26H2 Windows didn't migrate after 2 restarts. Don't rely on it. If you tried it, set it back to 1.
+
+So pick one:
+
+- **Protection off (simplest on a personal PC):** keep the flags disabled. Your imported choices keep working.
+- **Protection on:** leave the flags on and run `Run-Import.bat`. The direct write gets ignored, so Import walks you through Settings for every app instead. Choices set that way survive updates without ViVeTool.
+
+**If your default apps suddenly change after a Windows update,** Microsoft has probably turned the flags back on. Disable them again with ViVeTool and restart. Your choices come straight back from `UserChoice`, with no Import needed.
+
+Background: [UserChoiceLatest: Microsoft's new protection for file type associations](https://kolbi.cz/blog/2025/04/20/userchoicelatest-microsofts-new-protection-for-file-type-associations/) (Christoph Kolbicz, who reverse-engineered it). Microsoft doesn't document any of this.
 
 ## Options
 
