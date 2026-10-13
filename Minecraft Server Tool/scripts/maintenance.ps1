@@ -179,7 +179,12 @@ if (-not $willReboot) {
     Stop-Transcript | Out-Null; exit 0
 }
 
-Write-Host "`n--- Rebooting in 30s ---"
+$rebootSeconds = [int]$RebootWarnSeconds
+if ($rebootSeconds -lt 0) { $rebootSeconds = 120 }
+$rebootAt = (Get-Date).AddSeconds($rebootSeconds)
+$rebootIn = if ($rebootSeconds -ge 120 -and $rebootSeconds % 60 -eq 0) { "$($rebootSeconds / 60) minutes" } else { "$rebootSeconds seconds" }
+Write-Host "`n--- Rebooting in $rebootIn ($($rebootAt.ToString('HH:mm:ss'))) ---"
 Write-Host ("=== Maintenance finished in {0:N0} min (rebooting) {1} ===" -f ((Get-Date) - $t0).TotalMinutes, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
 Stop-Transcript | Out-Null
-& shutdown.exe /r /t 30 /c "Minecraft maintenance" /d p:0:0
+# Windows' "You're about to be signed out" dialog shows this text but no countdown, so put the time in it
+& shutdown.exe /r /t $rebootSeconds /c "Minecraft maintenance: this PC restarts in $rebootIn, at $($rebootAt.ToString('h:mm tt')). Save your work." /d p:0:0

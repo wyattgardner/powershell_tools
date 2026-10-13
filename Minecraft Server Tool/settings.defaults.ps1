@@ -95,6 +95,10 @@ $InstallWindowsUpdates = $false
 # The services are Automatic, so the servers come back after a reboot by themselves.
 $RebootAfterMaintenance = "Never"
 
+# Seconds of warning before that reboot. Windows shows a "You're about to be signed
+# out" message with the restart time, so anyone at the PC can save their work.
+$RebootWarnSeconds = 120
+
 # Let install-automation.ps1 set Group Policy "Configure Automatic Updates" to
 # 3 (download, notify to install), so Windows never installs or reboots on its own
 # and maintenance is the only time it happens. Only makes sense with

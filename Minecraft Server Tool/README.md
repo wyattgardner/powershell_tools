@@ -161,6 +161,7 @@ is what a dedicated, always-on server box might use.
 | `$MaintenanceRestartServers` | `$true` | Restart even when nothing was updated | same |
 | `$InstallWindowsUpdates` | `$false` | Install Windows updates during maintenance, with the servers stopped | `$true` |
 | `$RebootAfterMaintenance` | `"Never"` | `"Never"`, `"IfRequired"`, or `"Always"` | `"Always"` |
+| `$RebootWarnSeconds` | `120` | Warning before that reboot. Windows' "You're about to be signed out" message shows the restart time. | same |
 | `$ManageWindowsUpdatePolicy` | `$false` | Stop Windows installing or rebooting on its own, so maintenance is the only time it happens | `$true` |
 | `$ServerLogRotateMB` / `$ServerLogKeep` | `20` / `5` | Rotate `minecraft.log` at server start past this size; old logs kept | same |
 
