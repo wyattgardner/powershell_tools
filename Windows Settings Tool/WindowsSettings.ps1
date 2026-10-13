@@ -314,15 +314,19 @@ function Read-RegValues($key, $names) {
     $k.Close()
 }
 
+# The useful part of an error: .NET calls from PowerShell wrap the real message in "Exception calling ..."
+function Get-ErrorText($err) { $e = $err.Exception; if ($e.InnerException) { $e.InnerException.Message } else { $e.Message } }
+
 # Writes through .NET so odd key names (brackets, $, *) and default values ("") work
 function Write-RegValue($v) {
     if ($v.Kind -notin 'String', 'ExpandString', 'Binary', 'DWord', 'QWord', 'MultiString') { return }
-    $data = switch ($v.Kind) {
-        'Binary'      { [byte[]][Convert]::FromBase64String($v.Data) }
-        'MultiString' { [string[]]@($v.Data) }
-        'DWord'       { [int]$v.Data }
-        'QWord'       { [long]$v.Data }
-        default       { [string]$v.Data }
+    # Assign inside the switch: a switch's output is a pipeline, which would unroll byte[] and string[] into loose items
+    switch ($v.Kind) {
+        'Binary'      { $data = [byte[]][Convert]::FromBase64String($v.Data) }
+        'MultiString' { $data = [string[]]@($v.Data) }
+        'DWord'       { $data = [int]$v.Data }
+        'QWord'       { $data = [long]$v.Data }
+        default       { $data = [string]$v.Data }
     }
     $k = Open-RegKey $v.Key $true
     $k.SetValue([string]$v.Name, $data, [Microsoft.Win32.RegistryValueKind]$v.Kind)
@@ -1179,11 +1183,11 @@ foreach ($v in @(Read-JsonArray "$Path\values.json")) {
     if ($v.Key -like '*User Shell Folders' -and -not (Test-Path ([Environment]::ExpandEnvironmentVariables($v.Data)))) {
         Write-Warning "Skipped folder location $($v.Name): $($v.Data) doesn't exist here"; continue
     }
-    try { Write-RegValue $v; $ok++ } catch { $failed += "$($v.Key.Substring(5))\$($v.Name)" }
+    try { Write-RegValue $v; $ok++ } catch { $failed += "$($v.Key.Substring(5))\$($v.Name): $(Get-ErrorText $_)" }
 }
 Write-Host "User settings: $ok values applied"
-# Windows blocks scripts from writing a few values (TaskbarDa, the Widgets button, on recent builds)
-if ($failed) { Write-Warning "Windows didn't allow $($failed.Count) values to be set: $($failed -join ', ')" }
+# Some values are protected on recent builds (TaskbarDa, the Widgets button, gives "access is not allowed")
+if ($failed) { Write-Warning "Couldn't set $($failed.Count) values:`n  $($failed -join "`n  ")" }
 
 # Named settings the old PC had at their default. Ones with a fixed Windows default are written only with OverwriteChangedSettings,
 # which undoes changes made on this PC.
@@ -1206,11 +1210,11 @@ if (($overwriteChanged -or $applyDevice) -and -not (Test-Path "$Path\defaults.js
                 $k = Open-RegKey $v.Key $true; $k.DeleteValue([string]$v.Name, $false); $k.Close()
             }
             $set += "$($d.Name) ($($d.Value))"
-        } catch { $blocked += $d.Name }
+        } catch { $blocked += "$($d.Name): $(Get-ErrorText $_)" }
     }
     $which = (@($(if ($overwriteChanged) { 'overwrite changed' }), $(if ($applyDevice) { 'old PC' })) | Where-Object { $_ }) -join ' and '
     Write-Host "Defaults ($which): $(if ($set) { "$($set.Count) set: $($set -join ', ')" } else { 'nothing to change' })"
-    if ($blocked) { Write-Warning "Windows didn't allow these to be reset: $($blocked -join ', ')" }
+    if ($blocked) { Write-Warning "Couldn't set:`n  $($blocked -join "`n  ")" }
     if ($needAdmin) { Write-Warning "Skipped without admin: $($needAdmin -join ', ')" }
 }
 
@@ -1240,7 +1244,9 @@ if ((Test-Path "$Path\files\UserPinned") -and -not (Get-ConfigBool 'DeleteExisti
         $restored += $lnk.BaseName
     }
     # Then the pin list, now that the shortcuts it points at are in place
-    foreach ($v in @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' })) { Write-RegValue $v }
+    foreach ($v in @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' })) {
+        try { Write-RegValue $v } catch { Write-Warning "Couldn't write the taskbar pin list ($($v.Name)): $(Get-ErrorText $_)" }
+    }
     # Store app pins live in the pin list itself; just report the ones not installed
     $fav = @(Read-JsonArray "$Path\values.json" | Where-Object { $_.Key -like '*\Taskband' -and $_.Name -eq 'Favorites' })[0]
     if ($fav) {
