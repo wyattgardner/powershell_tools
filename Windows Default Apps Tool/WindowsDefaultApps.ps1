@@ -4,11 +4,19 @@
   Modes:
     Export   Save the default apps you've changed from Windows' defaults into DefaultAppsBackup, plus CHANGES.md.
     Preview  Read-only. Show what Import would set on this PC, and what it would skip because the app isn't installed.
-    Import   Apply them (needs admin). Takes effect at your next sign-in.
+    Import   Apply them.
 
-  Windows signs default app choices with a per-PC hash and guards browser/PDF choices, so scripts can't write them
-  directly. Import uses the supported route instead: Windows' "default associations configuration" policy, which
-  applies an XML file at sign-in. A one-time cleanup task removes the policy afterwards so you can still change apps.
+  Windows signs default app choices with a per-user hash and guards browser/PDF choices. Import has 3 routes
+  (ImportMethod in config):
+    Direct  Writes each choice with its UserChoice hash. Only works where UserChoiceLatest is off (see README), and
+            never for http, https, or .pdf, which a Windows driver protects. It checks the first write took; if not,
+            or for the protected types, it hands over to Guided.
+    Guided  Opens each app's Default apps page in Settings, lists the types to set there, and checks them off as
+            you go. Works on any PC.
+    Policy  Windows' "default associations configuration" policy, which applies an XML file at sign-in (needs admin).
+            Windows only honors it for existing accounts on domain-joined PCs; elsewhere it only affects new accounts.
+            A one-time cleanup task removes the policy afterwards so you can still change apps.
+  Auto (the default) uses Policy on domain-joined PCs and Direct everywhere else.
 
   Normally run through Run-Export.bat, Run-Preview.bat, and Run-Import.bat.
 #>
@@ -41,9 +49,14 @@ if (-not $Path -and $Config.BackupPath) {
 }
 if (-not $PSBoundParameters.ContainsKey('OnlyMine')) { $OnlyMine = Get-ConfigBool 'OnlyMine' $false }
 if (-not $PSBoundParameters.ContainsKey('Yes')) { $Yes = Get-ConfigBool 'SkipConfirm' $false }
+# Import route: Policy only works for existing accounts on domain-joined PCs, so Auto picks Direct everywhere else
+# (Direct falls back to Guided by itself when it can't write)
+$Method = if ($Config.ImportMethod) { "$($Config.ImportMethod)" } else { 'Auto' }
+if ($Method -notin 'Auto', 'Direct', 'Guided', 'Policy') { Write-Warning "ImportMethod '$Method' isn't Auto, Direct, Guided, or Policy. Using Auto."; $Method = 'Auto' }
+if ($Method -eq 'Auto') { $Method = if ((Get-CimInstance Win32_ComputerSystem).PartOfDomain) { 'Policy' } else { 'Direct' } }
 # RunAsAdmin (on by default): reopen this script in an admin window when the mode needs it. Exit code 99 tells the .bat it moved on.
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (($Mode -eq 'Import') -and -not $IsAdmin -and -not $Elevated -and (Get-ConfigBool 'RunAsAdmin' $true)) {
+if (($Mode -eq 'Import') -and ($Method -eq 'Policy') -and -not $IsAdmin -and -not $Elevated -and (Get-ConfigBool 'RunAsAdmin' $true)) {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$($MyInvocation.MyCommand.Path)`"", '-Elevated')
     foreach ($p in $PSBoundParameters.GetEnumerator()) {
         if ($p.Value -is [switch]) { if ($p.Value.IsPresent) { $a += "-$($p.Key)" } } else { $a += "-$($p.Key)", "`"$($p.Value)`"" }
@@ -69,6 +82,73 @@ Add-Type -Namespace Win32 -Name Shlwapi -MemberDefinition @'
 [DllImport("shlwapi.dll", CharSet=CharSet.Unicode)]
 public static extern int SHLoadIndirectString(string pszSource, System.Text.StringBuilder pszOutBuf, int cchOutBuf, System.IntPtr ppvReserved);
 '@
+
+# The UserChoice hash (the pre-UserChoiceLatest one), plus a key's last-write time, which the hash includes.
+# Same algorithm as SetUserFTA and Firefox's default browser agent.
+if (-not ('Win32.UserChoice' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+namespace Win32 {
+public static class UserChoice {
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegQueryInfoKey(Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey, IntPtr c, IntPtr cc, IntPtr r, IntPtr sk, IntPtr msk, IntPtr mc, IntPtr v, IntPtr mvn, IntPtr mvl, IntPtr sd, out long lastWrite);
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(int eventId, int flags, IntPtr item1, IntPtr item2);
+
+    public static long LastWrite(Microsoft.Win32.RegistryKey k) {
+        long t; RegQueryInfoKey(k.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out t); return t;
+    }
+
+    // fileTime: the UserChoice key's last-write time (UTC FILETIME). Only the minute counts.
+    public static string Hash(string type, string sid, string progId, long fileTime) {
+        long ft = fileTime - (fileTime % 600000000L);
+        string ts = ((uint)(ft >> 32)).ToString("x8") + ((uint)ft).ToString("x8");
+        string s = (type + sid + progId + ts + "User Choice set via Windows User Experience {D18B6DD5-6124-4341-9318-804003BAFA0B}").ToLowerInvariant();
+        byte[] data = Encoding.Unicode.GetBytes(s + "\0");
+        byte[] md5 = MD5.Create().ComputeHash(data);
+        int n = (data.Length / 4) & ~1;
+        uint[] d = new uint[n];
+        for (int i = 0; i < n; i++) d[i] = BitConverter.ToUInt32(data, i * 4);
+        uint m0 = BitConverter.ToUInt32(md5, 0) | 1, m1 = BitConverter.ToUInt32(md5, 4) | 1;
+        uint h1 = 0, s1 = 0, h2 = 0, s2 = 0;
+        unchecked {
+            uint a = m0 + 0x69FB0000, b = m1 + 0x13DB0000;
+            for (int i = 0; i < n; i += 2) {
+                uint u = d[i] + h1;
+                u = u * a - 0x10FA9605 * (u >> 16);
+                u = 0x79F8A395 * u + 0x689B6B9F * (u >> 16);
+                uint r = 0xEA970001 * u - 0x3C101569 * (u >> 16);
+                u = (r + d[i + 1]) * b - 0x3CE8EC25 * ((r + d[i + 1]) >> 16);
+                u = 0x59C3AF2D * u - 0x2232E0F1 * (u >> 16);
+                h1 = 0x1EC90001 * u + 0x35BD1EC9 * (u >> 16);
+                s1 += r + h1;
+            }
+            for (int i = 0; i < n; i += 2) {
+                uint u = (d[i] + h2) * m0;
+                u = 0xB1110000 * u - 0x30674EEF * (u >> 16);
+                u = 0x5B9F0000 * u - 0x78F7A461 * (u >> 16);
+                u = 0x12CEB96D * (u >> 16) - 0x46930000 * u;
+                uint r = 0x1D830000 * u + 0x257E1D83 * (u >> 16);
+                u = m1 * (r + d[i + 1]);
+                u = 0x16F50000 * u - 0x5D8BE90B * (u >> 16);
+                u = 0x96FF0000 * u - 0x2C7C6901 * (u >> 16);
+                u = 0x2B890000 * u + 0x7C932B89 * (u >> 16);
+                h2 = 0x9F690000 * u - 0x405B6097 * (u >> 16);
+                s2 += h2 + r;
+            }
+        }
+        byte[] o = new byte[8];
+        BitConverter.GetBytes(h1 ^ h2).CopyTo(o, 0);
+        BitConverter.GetBytes(s1 ^ s2).CopyTo(o, 4);
+        return Convert.ToBase64String(o);
+    }
+}
+}
+'@
+}
 
 # Direct .NET registry access. PowerShell's registry provider is very slow on HKEY_CLASSES_ROOT.
 function Open-Key($key) {
@@ -102,12 +182,19 @@ function Resolve-Name($s) {
     $s
 }
 
-# The app chosen for each file type and link type. UserChoiceLatest is the live one on newer builds.
+# The app chosen for each file type and link type. UserChoiceLatest is the live one on newer builds, UserChoice
+# where that's turned off. Both can be there, so take whichever was written last.
 function Get-Choices {
     foreach ($base in $FileExts, $UrlAssoc) {
         foreach ($id in @(Get-SubKeyNames $base)) {
-            $p = Or (Get-Reg "$base\$id\UserChoiceLatest\ProgId" ProgId) (Get-Reg "$base\$id\UserChoice" ProgId)
-            if ($p) { [pscustomobject]@{ Identifier = $id.ToLower(); ProgId = $p } }
+            $best = $null; $bestTime = -1
+            foreach ($sub in 'UserChoiceLatest\ProgId', 'UserChoice') {
+                $k = Open-Key "$base\$id\$sub"
+                if (-not $k) { continue }
+                $p = $k.GetValue('ProgId'); $t = [Win32.UserChoice]::LastWrite($k); $k.Close()
+                if ($p -and $t -gt $bestTime) { $best = $p; $bestTime = $t }
+            }
+            if ($best) { [pscustomobject]@{ Identifier = $id.ToLower(); ProgId = $best } }
         }
     }
 }
@@ -134,7 +221,7 @@ function Get-AppIndex {
             if (-not $types.Count) { continue }
             $key = "reg:$name"
             # Names are resolved only when needed; there can be hundreds of Store apps
-            $apps[$key] = [pscustomobject]@{ Key = $key; RawName = (Or (Get-Reg $cap ApplicationName) $name); Name = $null; Types = $types }
+            $apps[$key] = [pscustomobject]@{ Key = $key; RegName = $name; Hive = $hive; RawName = (Or (Get-Reg $cap ApplicationName) $name); Name = $null; Types = $types }
             foreach ($p in $types.Values) { if (-not $byProgId.ContainsKey($p)) { $byProgId[$p] = $key } }
             # Desktop apps: remember their program file, to match ProgIds they use but don't list (VLC.mp4.Document, etc.)
             if ($hive -eq 'HKLM') {
@@ -244,8 +331,24 @@ $saved = @(foreach ($x in (Get-Content "$Path\apps.json" -Raw | ConvertFrom-Json
 Write-Host 'Checking which apps are installed on this PC...'
 $oem = Get-OemDefaults
 $index = Get-AppIndex
-$current = @{}; foreach ($c in Get-Choices) { $current[$c.Identifier] = $c.ProgId }
-function Get-CurrentProgId($id) { Or $current[$id] $(if ($oem[$id]) { $oem[$id].ProgId }) }
+Add-Type -Namespace Win32 -Name Assoc -MemberDefinition @'
+[DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+public static extern int AssocQueryString(int flags, int str, string assoc, string extra, System.Text.StringBuilder outStr, ref uint outLen);
+'@
+# The app Windows actually uses for a type right now, asked of Windows itself. This reads whichever of
+# UserChoice and UserChoiceLatest is live, and falls back to Windows' own default when there's no choice.
+function Get-CurrentProgId($id) {
+    $sb = New-Object Text.StringBuilder 512; $n = [uint32]512
+    $flags = if ($id.StartsWith('.')) { 0 } else { 0x1000 }   # ASSOCF_IS_PROTOCOL for link types like http
+    if ([Win32.Assoc]::AssocQueryString($flags, 20, $id, $null, $sb, [ref]$n) -ne 0) { return $null }   # 20 = ASSOCSTR_PROGID
+    $p = $sb.ToString()
+    if ($p -in 'Unknown', 'Undecided') { $null } else { $p }
+}
+# Set means this PC already opens the type with that app, even under a different ProgId of the same app
+function Test-IsSet($item) {
+    $cur = Get-CurrentProgId $item.Identifier
+    $cur -and ($cur -eq $item.ProgId -or (Get-AppKey $cur $index) -eq (Get-AppKey $item.ProgId $index))
+}
 
 # The ProgId this PC uses for that app and type, or $null if the app isn't installed here
 function Find-ProgId($s) {
@@ -295,7 +398,7 @@ foreach ($appKey in @($(if (-not $OnlyMine) { $replaced.Keys }))) {
     }
 }
 
-$todo = @($plan.Values | Where-Object { (Get-CurrentProgId $_.Identifier) -ne $_.ProgId })
+$todo = @($plan.Values | Where-Object { -not (Test-IsSet $_) })
 $already = $plan.Count - $todo.Count
 
 Write-Host ''
@@ -313,7 +416,118 @@ if ($Mode -eq 'Preview') { Write-Host "`nPreview only. Nothing was changed." -Fo
 
 # ================= Import =================
 if (-not $todo.Count) { Write-Host "`nNothing to do." -ForegroundColor Green; return }
-if (-not $IsAdmin) { throw 'Import needs admin. Use Run-Import.bat and click Yes.' }
+
+# The Default apps page in Settings for the app behind a ProgId on this PC
+# Store apps by app ID; desktop apps by the name they registered with Windows (Chrome also has an app ID, but
+# Settings only finds it by registered name); apps that never registered (VS Code, 7-Zip) get the main page.
+function Get-SettingsUri($progId) {
+    $aumid = Get-Reg "HKCR\$progId\Application" AppUserModelID
+    if ($aumid -like '*!*') { return "ms-settings:defaultapps?registeredAUMID=$([uri]::EscapeDataString($aumid))" }
+    $reg = $index.ByProgId[$progId]
+    if (-not $reg) { $exe = Get-ProgIdExe $progId; if ($exe) { $reg = $index.ByExe[$exe] } }
+    $a = if ($reg) { $index.Apps[$reg] }
+    if ($a) { return "ms-settings:defaultapps?registeredApp$(if ($a.Hive -eq 'HKLM') { 'Machine' } else { 'User' })=$([uri]::EscapeDataString($a.RegName))" }
+    'ms-settings:defaultapps'
+}
+
+if ($Method -eq 'Direct') {
+    # A Windows driver blocks scripts from writing these, whatever the hash (.htm and .html on newer builds)
+    $locked = 'http', 'https', '.pdf', '.htm', '.html'
+    $protected = @($todo | Where-Object { $_.Identifier -in $locked })
+    $writable = @($todo | Where-Object { $_.Identifier -notin $locked })
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $hkcu = [Microsoft.Win32.Registry]::CurrentUser
+    function Set-UserChoice($id, $progId) {
+        $path = "$(if ($id.StartsWith('.')) { $FileExts } else { $UrlAssoc })\$id\UserChoice".Substring(5)
+        for ($try = 0; $try -lt 3; $try++) {
+            $hkcu.DeleteSubKey($path, $false)   # Windows locks the existing key against edits, so replace it
+            $k = $hkcu.CreateSubKey($path)
+            try {
+                $k.SetValue('ProgId', $progId)
+                $k.SetValue('Hash', [Win32.UserChoice]::Hash($id, $sid, $progId, [DateTime]::UtcNow.ToFileTimeUtc()))
+                # The hash covers the minute the key was written; redo it in the rare case the minute ticked over
+                if ($k.GetValue('Hash') -eq [Win32.UserChoice]::Hash($id, $sid, $progId, [Win32.UserChoice]::LastWrite($k))) { return }
+            } finally { $k.Close() }
+        }
+    }
+    if ($writable.Count) {
+        Write-Host "`nImport sets $($writable.Count) of these directly."
+        if ($protected.Count) { Write-Host "Windows only lets you set $(($protected.Identifier | Sort-Object) -join ', ') in Settings, so Import walks you through $(if ($protected.Count -eq 1) { 'that' } else { 'those' }) after." }
+        if (-not $Yes) {
+            $a = Read-Host "`nSet them now? (Y/N)"
+            if ($a -notmatch '^(y|yes)$') { Write-Host 'Cancelled. Nothing was changed.'; return }
+        }
+        $works = $null
+        foreach ($t in $writable) {
+            if ($works -eq $false) { break }
+            try { Set-UserChoice $t.Identifier $t.ProgId } catch { Write-Warning "Couldn't write $($t.Identifier): $($_.Exception.Message)"; continue }
+            if ($null -eq $works) {
+                # Check the first one took before writing the rest
+                [Win32.UserChoice]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)   # SHCNE_ASSOCCHANGED
+                $works = [bool](Test-IsSet $t)
+                if (-not $works) {
+                    Write-Host "`nWindows ignored that, which means UserChoiceLatest is on for this PC (see ""How Windows protects default apps"" in the README)." -ForegroundColor Yellow
+                    Write-Host 'Switching to setting them in Settings instead.'
+                }
+            }
+        }
+        [Win32.UserChoice]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+        $notSet = @($writable | Where-Object { -not (Test-IsSet $_) })
+        if ($works) { Write-Host "$($writable.Count - $notSet.Count) of $($writable.Count) set." -ForegroundColor $(if ($notSet.Count) { 'Yellow' } else { 'Green' }) }
+        $todo = @($protected) + $notSet
+    } else { $todo = $protected }
+    if (-not $todo.Count) { Write-Host "`nDone." -ForegroundColor Green; return }
+    $Method = 'Guided'
+}
+
+if ($Method -eq 'Guided') {
+    # One app at a time: open its page in Settings, list the types, then check which ones took.
+    # Apps that never registered with Windows have a separate ProgId-based key per type, so group those by name.
+    $groups = @($todo | Group-Object { $k = Get-AppKey $_.ProgId $index; if ($k -like 'progid:*') { "name:$($_.AppName)" } else { $k } } | Sort-Object { $_.Group[0].AppName })
+    Write-Host "`nImport opens each app's Default apps page in Settings, one at a time ($($groups.Count) app$(if ($groups.Count -ne 1) { 's' }))."
+    Write-Host 'Windows only lets you set these there, so it lists what to click and checks each one off.'
+    if (-not $Yes) {
+        $a = Read-Host "`nStart? (Y/N)"
+        if ($a -notmatch '^(y|yes)$') { Write-Host 'Cancelled. Nothing was changed.'; return }
+    }
+    $left = New-Object System.Collections.Generic.List[object]
+    $i = 0; $stopped = $false
+    foreach ($g in $groups) {
+        $i++
+        $pending = @($g.Group | Where-Object { -not (Test-IsSet $_) })   # one may have been set along with an earlier app
+        if (-not $pending.Count) { continue }
+        if ($stopped) { $left.AddRange([object[]]$pending); continue }
+        $name = $g.Group[0].AppName
+        Write-Host "`n[$i/$($groups.Count)] $name" -ForegroundColor Cyan
+        $uri = Get-SettingsUri $g.Group[0].ProgId
+        if ($uri -eq 'ms-settings:defaultapps') { Write-Host "  Settings opens on Default apps. Search for each type below and choose $name." }
+        else { Write-Host "  Settings opens on $name's page. If it lands on the main Default apps page instead, search for $name." }
+        if (@($pending.Identifier) -contains 'http' -or @($pending.Identifier) -contains 'https') {
+            Write-Host '  Tip: the "Set default" button at the top of its page sets links and web files in one click.'
+        }
+        Start-Process $uri
+        while ($true) {
+            Write-Host "  Set to ${name} ($($pending.Count)): $(($pending | ForEach-Object Identifier | Sort-Object) -join ', ')"
+            $a = Read-Host '  Press Enter when done (S skips this app, Q stops)'
+            $pending = @($pending | Where-Object { -not (Test-IsSet $_) })
+            if (-not $pending.Count) { Write-Host '  All set.' -ForegroundColor Green; break }
+            if ($a -match '^[sq]') { break }
+            Write-Host '  Not set yet:' -ForegroundColor Yellow
+        }
+        $left.AddRange([object[]]$pending)
+        if ($a -match '^q') { $stopped = $true }
+    }
+    $set = $todo.Count - $left.Count
+    Write-Host "`n$set of $($todo.Count) set." -ForegroundColor $(if ($left.Count) { 'Yellow' } else { 'Green' })
+    if ($left.Count) {
+        Write-Host 'Still to set (run Import again to pick up where you left off):'
+        $left | Group-Object AppName | ForEach-Object { Write-Host "  $($_.Name): $(($_.Group | ForEach-Object Identifier | Sort-Object) -join ', ')" }
+    }
+    return
+}
+
+# Policy route (domain-joined PCs)
+if (-not $IsAdmin) { throw 'The Policy import method needs admin. Use Run-Import.bat and click Yes.' }
 if (-not $Yes) {
     $a = Read-Host "`nApply these $($todo.Count) default apps at your next sign-in? (Y/N)"
     if ($a -notmatch '^(y|yes)$') { Write-Host 'Cancelled. Nothing was changed.'; return }
