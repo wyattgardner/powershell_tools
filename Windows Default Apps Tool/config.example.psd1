@@ -1,4 +1,7 @@
-# Windows Default Apps Tool options. Command-line switches override these.
+# Defaults for the Windows Default Apps Tool. Don't edit this file: it's replaced when the tool updates.
+# To change an option, create config.psd1 next to it with just the options you want, e.g.
+#   @{ Logging = $true }
+# config.psd1 isn't tracked by git. Command-line switches override both files.
 @{
     # Reopen in an admin window for Import, which uses a Windows policy.
     # Export and Preview never ask. Default: $true

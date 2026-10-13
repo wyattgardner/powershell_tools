@@ -2,3 +2,6 @@
 WinSettingsBackup/
 DIFF.md
 Logs/
+
+# Your own options (defaults are in config.example.psd1)
+config.psd1

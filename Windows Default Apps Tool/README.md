@@ -12,7 +12,8 @@ Carries your default apps (which app opens each file type and link) to a fresh W
 | `WindowsDefaultApps.ps1` | The script that does the work |
 | `DefaultAppsBackup\` | Created by export |
 | `DefaultAppsBackup\CHANGES.md` | Created by export. Every default app you've changed from Windows' defaults, grouped by app |
-| `config.psd1` | Options (see below) |
+| `config.example.psd1` | Default options, with an explanation of each (see below) |
+| `config.psd1` | Your own options, if you create it. Not tracked by git |
 | `Logs\` | Transcripts of each run, when `Logging` is on |
 
 ## How it decides what to set
@@ -47,9 +48,15 @@ Windows signs default app choices with a per-PC hash and blocks scripts from wri
 
 The import writes that XML to `C:\ProgramData\WindowsDefaultApps\associations.xml`, turns the policy on, and sets up a one-time task that turns the policy back off 2 minutes after you sign in. Your defaults stick, and you can still change them normally afterwards. Without that cleanup, Windows would reset them at every sign-in.
 
-## Options (config.psd1)
+## Options
 
-Edit `config.psd1` next to the script. Command-line switches override it.
+The defaults are in `config.example.psd1`. Don't edit that file, since updates replace it. To change an option, create `config.psd1` next to the script with only the options you want, for example:
+
+```powershell
+@{ Logging = $true }
+```
+
+Anything you leave out keeps its default. Command-line switches override both files.
 
 | Option | Default | What it does |
 |---|---|---|

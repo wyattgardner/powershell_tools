@@ -16,7 +16,8 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 | `WinSettingsBackup\CHANGES.md` | Created by export. Every setting you've changed from the Windows default, and what the default is |
 | `WinSettingsBackup\CHANGES_LONG.md` | Created by export. Every item the backup holds in full detail: registry keys, values, what the Default profile had, why each one was saved, power GUIDs, and the full recorded lists |
 | `DIFF.md` | Created by Run-Diff. What's different between the backup and this PC |
-| `config.psd1` | Options (see below) |
+| `config.example.psd1` | Default options, with an explanation of each (see below) |
+| `config.psd1` | Your own options, if you create it. Not tracked by git |
 | `Logs\` | Transcripts of each run, when `Logging` is on |
 
 ## What gets copied
@@ -99,9 +100,15 @@ Double-click `Run-Diff.bat` on the new PC. It doesn't change anything. It compar
 
 Run-Diff also works on the old PC, to see what's changed since the last export.
 
-## Options (config.psd1)
+## Options
 
-Edit `config.psd1` next to the script. Command-line switches override it.
+The defaults are in `config.example.psd1`. Don't edit that file, since updates replace it. To change an option, create `config.psd1` next to the script with only the options you want, for example:
+
+```powershell
+@{ Logging = $true }
+```
+
+Anything you leave out keeps its default. Command-line switches override both files.
 
 | Option | Default | What it does |
 |---|---|---|

@@ -25,11 +25,14 @@ param(
 try {
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-# Options come from config.psd1 next to the script (read as data, never run). Command-line switches override it.
+# Options: defaults from config.example.psd1, then your overrides from config.psd1 (not tracked by git).
+# Both are read as data, never run. Command-line switches override both.
 $Config = @{}
-$ConfigFile = Join-Path $ScriptDir 'config.psd1'
-if (Test-Path $ConfigFile) {
-    try { $Config = Import-PowerShellDataFile $ConfigFile } catch { Write-Warning "Couldn't read config.psd1, using defaults: $($_.Exception.Message)" }
+foreach ($name in 'config.example.psd1', 'config.psd1') {
+    $file = Join-Path $ScriptDir $name
+    if (-not (Test-Path $file)) { continue }
+    try { $c = Import-PowerShellDataFile $file; foreach ($k in $c.Keys) { $Config[$k] = $c[$k] } }
+    catch { Write-Warning "Couldn't read $name, skipping it: $($_.Exception.Message)" }
 }
 function Get-ConfigBool($name, $default) { if ($Config.ContainsKey($name)) { [bool]$Config[$name] } else { $default } }
 if (-not $Path -and $Config.BackupPath) {

@@ -1,6 +1,6 @@
 # PowerShell tools
 
-Miscellaneous vibe-coded PowerShell tools for Windows. Each one lives in its own folder with its own README, launchers, and `config.psd1`.
+Miscellaneous vibe-coded PowerShell tools for Windows. Each one lives in its own folder with its own README and launchers.
 
 They run on the Windows PowerShell 5.1 that ships with Windows 11. Nothing to install.
 
@@ -35,7 +35,7 @@ Runs one or more Spigot servers on a Windows PC as proper Windows services, usin
 
 ## Using them
 
-Each tool's README covers setup and use. The Windows tools run from their `Run-*.bat` files, with options in `config.psd1`. The Minecraft tool starts from `install.cmd`, with options in `settings.ps1` and `install.config.ps1`.
+Each tool's README covers setup and use. The Windows tools run from their `Run-*.bat` files, with default options in `config.example.psd1` and your own in `config.psd1`. The Minecraft tool starts from `install.cmd`, with options in `settings.ps1` and `install.config.ps1`.
 
 What the tools generate or what holds your own data (settings backups, reports, server folders and worlds, RCON passwords, downloaded binaries, logs) is excluded by each tool's `.gitignore`. The root `.gitignore` covers what applies everywhere, like logs and editor files.
 
