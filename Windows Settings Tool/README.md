@@ -15,6 +15,7 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 | `WinSettingsBackup\` | Created by export. Holds your saved settings |
 | `WinSettingsBackup\CHANGES.md` | Created by export. Every setting you've changed from the Windows default, and what the default is |
 | `WinSettingsBackup\CHANGES_LONG.md` | Created by export. Every item the backup holds in full detail: registry keys, values, what the Default profile had, why each one was saved, power GUIDs, and the full recorded lists |
+| `WinSettingsBackup\desktop-icons.json` | Created by export. Where each desktop icon sits |
 | `WinSettingsBackup\defaults.json` | Created by export. Named settings that were at their default, used by `OverwriteChangedSettings` and `ApplyDeviceDefaults` |
 | `DIFF.md` | Created by Run-Diff. What's different between the backup and this PC |
 | `config.example.psd1` | Default options, with an explanation of each (see below) |
@@ -29,7 +30,7 @@ Settings that apps manage themselves (Office's account info, Tailscale's hosts e
 
 **Start:** layout, pinned apps, recently added/most used apps, recommendations, account notifications.
 
-**File Explorer and desktop:** hidden files, file extensions, opens to, full path, classic right-click menu, Quick access pins, recent/frequent files in Home, navigation pane, compact view, check boxes, folder views (icon size, sort, columns), desktop icons, Documents/Downloads/etc. locations.
+**File Explorer and desktop:** hidden files, file extensions, opens to, full path, classic right-click menu, Quick access pins, recent/frequent files in Home, navigation pane, compact view, check boxes, folder views (icon size, sort, columns), desktop icons, desktop icon layout (see Notes), Documents/Downloads/etc. locations.
 
 **System:** notifications (global and per app), tips and suggestions, clipboard history, Storage Sense, snap layouts, shake to minimize, nearby sharing, per-app GPU preference, system sounds, communications ducking, user environment variables.
 
@@ -105,6 +106,7 @@ Double-click `Run-Diff.bat` on the new PC. It doesn't change anything. It compar
 - **Named settings** that differ, with a **Default** column: Yes means the new PC is still at the Windows default (so the import probably didn't take), No means it's set to something else, and n/a means there's no fixed default.
 - **Other saved values** that differ, covering everything else the backup holds.
 - **Recorded items** (services, tasks, features, policies) that differ.
+- **Desktop icons** on both PCs that sit in a different spot.
 
 Run-Diff also works on the old PC, to see what's changed since the last export.
 
@@ -155,6 +157,7 @@ Add `-Path E:\SomeFolder` to use a different backup folder, `-ComputerName FromB
 - **Wallpaper and lock screen:** the images are copied into `Pictures\Wallpapers` on the new PC.
 - **Folder locations:** if you moved Documents to `D:\Documents`, it's only applied when that folder exists on the new PC.
 - **Environment variables:** your user `Path` is merged, not replaced, so the new PC's entries stay.
+- **Desktop icon layout:** export saves where each desktop icon sits, plus auto arrange and align to grid. Import moves each icon the new PC also has (matched by file name, like `Google Chrome.lnk`) to the same spot. Icons only on the old PC are skipped, and icons only on the new PC stay where they are, unless a restored icon lands on one, which then moves to a free spot. Spots are counted in grid cells from the main monitor's top-left corner, so they carry over a different resolution or scaling. An icon whose spot is off the new PC's screens goes to the first free spot. The desktop files themselves aren't copied, so install your apps first.
 - **Hibernate:** whether it's available, and its timers, are copied as is.
 - **Re-running import:** safe. It just applies the same settings again.
 

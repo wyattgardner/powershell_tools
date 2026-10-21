@@ -488,6 +488,201 @@ public static class WinSettingsHive {
 '@
 }
 
+# The desktop's icons, read and moved through Explorer's own view of the desktop. Explorer saves positions in a
+# blob tied to the exact screen setup, so it's no use on another PC. This works icon by icon instead.
+if (-not ('WinSettingsDesktop' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Reflection; using System.Runtime.InteropServices; using System.Text;
+public static class WinSettingsDesktop {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int Size; public RECT Monitor, Work; public int Flags; }
+    [ComImport, Guid("6D5140C1-7436-11CE-8034-00AA006009FA"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IServiceProvider { void QueryService(ref Guid sid, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object obj); }
+    // Methods that are never called are declared bare, only to hold the called ones' places in the vtable
+    [ComImport, Guid("000214E2-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellBrowser {
+        void GetWindow(); void ContextSensitiveHelp(); void InsertMenusSB(); void SetMenuSB(); void RemoveMenusSB(); void SetStatusTextSB();
+        void EnableModelessSB(); void TranslateAcceleratorSB(); void BrowseObject(); void GetViewStateStream(); void GetControlWindow(); void SendControlMsg();
+        void QueryActiveShellView([MarshalAs(UnmanagedType.IUnknown)] out object view);
+    }
+    [ComImport, Guid("000214E3-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellView {
+        void GetWindow(out IntPtr hwnd); void ContextSensitiveHelp(); void TranslateAccelerator(); void EnableModeless(); void UIActivate(); void Refresh();
+        void CreateViewWindow(); void DestroyViewWindow(); void GetCurrentInfo(); void AddPropertySheetPages();
+        void SaveViewState();
+    }
+    [ComImport, Guid("1af3a467-214f-4298-908e-06b03e0b39f9"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IFolderView2 {
+        void GetCurrentViewMode(); void SetCurrentViewMode();
+        void GetFolder(ref Guid riid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+        void Item(int i, out IntPtr pidl);
+        void ItemCount(uint flags, out int count);
+        void Items(); void GetSelectionMarkedItem(); void GetFocusedItem();
+        void GetItemPosition(IntPtr pidl, out POINT pt);
+        void GetSpacing(ref POINT pt);
+        void GetDefaultSpacing(); void GetAutoArrange(); void SelectItem();
+        void SelectAndPositionItems(uint count, [MarshalAs(UnmanagedType.LPArray)] IntPtr[] pidls, [MarshalAs(UnmanagedType.LPArray)] POINT[] pts, uint flags);
+        void SetGroupBy(); void GetGroupBy(); void SetViewProperty(); void GetViewProperty(); void SetTileViewProperties(); void SetExtendedTileViewProperties(); void SetText();
+        void SetCurrentFolderFlags(uint mask, uint flags);
+        void GetCurrentFolderFlags(out uint flags);
+    }
+    [ComImport, Guid("000214E6-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellFolder {
+        void ParseDisplayName(); void EnumObjects(); void BindToObject(); void BindToStorage(); void CompareIDs(); void CreateViewObject(); void GetAttributesOf(); void GetUIObjectOf();
+        void GetDisplayNameOf(IntPtr pidl, uint flags, IntPtr strret);
+    }
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)] static extern int StrRetToBufW(IntPtr strret, IntPtr pidl, StringBuilder buf, int cch);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    delegate bool MonitorProc(IntPtr mon, IntPtr hdc, IntPtr rect, IntPtr data);
+    [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorProc proc, IntPtr data);
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MONITORINFO info);
+
+    public class Icon { public string Name; public string Label; public int X; public int Y; }
+    // Work areas in the desktop view's own coordinates (real pixels), the primary monitor first
+    public class Screen { public int Left, Top, Right, Bottom; }
+    public class View { public List<Icon> Icons = new List<Icon>(); public List<Screen> Screens = new List<Screen>(); public int CellX, CellY; public uint Flags; }
+
+    // The desktop's folder view, from the shell window registered for it. Null while Explorer is still starting.
+    static IFolderView2 Find(out IntPtr hwnd) {
+        hwnd = IntPtr.Zero;
+        SetThreadDpiAwarenessContext((IntPtr)(-4));   // per-monitor aware: real pixels, the same ones the desktop view uses
+        Type t = Type.GetTypeFromCLSID(new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39"));   // ShellWindows
+        object sw = Activator.CreateInstance(t);
+        object[] args = { 0, null, 8, 0, 1 };   // CSIDL_DESKTOP, SWC_DESKTOP, out hwnd, SWFO_NEEDDISPATCH
+        ParameterModifier pm = new ParameterModifier(5); pm[3] = true;
+        object disp = t.InvokeMember("FindWindowSW", BindingFlags.InvokeMethod, null, sw, args, new[] { pm }, null, null);
+        if (disp == null) return null;
+        Guid sid = new Guid("4C96BE40-915C-11CF-99D3-00AA004AE837"), iid = typeof(IShellBrowser).GUID;   // SID_STopLevelBrowser
+        object browser; ((IServiceProvider)disp).QueryService(ref sid, ref iid, out browser);
+        object view; ((IShellBrowser)browser).QueryActiveShellView(out view);
+        if (view == null) return null;
+        ((IShellView)view).GetWindow(out hwnd);
+        return (IFolderView2)view;
+    }
+    static IShellFolder Folder(IFolderView2 fv) { Guid iid = typeof(IShellFolder).GUID; object f; fv.GetFolder(ref iid, out f); return (IShellFolder)f; }
+    static string Name(IShellFolder folder, IntPtr pidl, uint flags) {
+        IntPtr strret = Marshal.AllocCoTaskMem(1024);
+        try { folder.GetDisplayNameOf(pidl, flags, strret); StringBuilder sb = new StringBuilder(1024); StrRetToBufW(strret, pidl, sb, sb.Capacity); return sb.ToString(); }
+        finally { Marshal.FreeCoTaskMem(strret); }
+    }
+
+    public static View Read() {
+        IntPtr hwnd; IFolderView2 fv = Find(out hwnd);
+        if (fv == null) return null;
+        View v = new View();
+        POINT cell = new POINT(); fv.GetSpacing(ref cell); v.CellX = cell.X; v.CellY = cell.Y;
+        fv.GetCurrentFolderFlags(out v.Flags);
+        RECT vr; GetWindowRect(hwnd, out vr);
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (mon, hdc, rect, data) => {
+            MONITORINFO mi = new MONITORINFO(); mi.Size = Marshal.SizeOf(mi); GetMonitorInfo(mon, ref mi);
+            Screen sc = new Screen { Left = mi.Work.L - vr.L, Top = mi.Work.T - vr.T, Right = mi.Work.R - vr.L, Bottom = mi.Work.B - vr.T };
+            if ((mi.Flags & 1) != 0) v.Screens.Insert(0, sc); else v.Screens.Add(sc);   // MONITORINFOF_PRIMARY
+            return true;
+        }, IntPtr.Zero);
+        IShellFolder folder = Folder(fv);
+        int n; fv.ItemCount(2, out n);   // SVGIO_ALLVIEW
+        for (int i = 0; i < n; i++) {
+            IntPtr pidl; fv.Item(i, out pidl);
+            try {
+                POINT p; fv.GetItemPosition(pidl, out p);
+                // SHGDN_INFOLDER | SHGDN_FORPARSING: the file name (Chrome.lnk) or ::{CLSID}, the same on every PC
+                v.Icons.Add(new Icon { Name = Name(folder, pidl, 0x8001), Label = Name(folder, pidl, 0), X = p.X, Y = p.Y });
+            } finally { Marshal.FreeCoTaskMem(pidl); }
+        }
+        return v;
+    }
+
+    // Auto arrange (1) and align to grid (4); mask picks which to change
+    public static void SetFlags(uint mask, uint flags) { IntPtr h; IFolderView2 fv = Find(out h); if (fv != null) fv.SetCurrentFolderFlags(mask, flags); }
+
+    // Moves each named icon to its point, then has Explorer save the layout. Returns how many it found.
+    public static int Move(string[] names, int[] xs, int[] ys) {
+        IntPtr hwnd; IFolderView2 fv = Find(out hwnd);
+        if (fv == null) return -1;
+        IShellFolder folder = Folder(fv);
+        Dictionary<string, POINT> want = new Dictionary<string, POINT>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < names.Length; i++) want[names[i]] = new POINT { X = xs[i], Y = ys[i] };
+        List<IntPtr> pidls = new List<IntPtr>(), all = new List<IntPtr>(); List<POINT> pts = new List<POINT>();
+        int n; fv.ItemCount(2, out n);
+        try {
+            for (int i = 0; i < n; i++) {
+                IntPtr pidl; fv.Item(i, out pidl); all.Add(pidl);
+                POINT p; if (want.TryGetValue(Name(folder, pidl, 0x8001), out p)) { pidls.Add(pidl); pts.Add(p); }
+            }
+            if (pidls.Count > 0) fv.SelectAndPositionItems((uint)pidls.Count, pidls.ToArray(), pts.ToArray(), 0x80);   // SVSI_POSITIONITEM
+        } finally { foreach (IntPtr p in all) Marshal.FreeCoTaskMem(p); }
+        ((IShellView)fv).SaveViewState();
+        return pidls.Count;
+    }
+}
+'@
+}
+
+# Desktop icons with their spots in grid cells from the primary monitor's top-left corner, so they carry across
+# screen sizes and scaling. Matched by file name, or ::{CLSID} for This PC, Recycle Bin, and the like.
+function Get-DesktopIcons($v) {
+    $p = $v.Screens[0]; $seen = @{}
+    foreach ($i in $v.Icons) {
+        if ($seen.ContainsKey($i.Name)) { continue }; $seen[$i.Name] = $true   # same name on your Desktop and the Public one: keep the first
+        [pscustomobject]@{ Name = $i.Name; Label = $i.Label; Col = [math]::Round(($i.X - $p.Left) / $v.CellX, 2); Row = [math]::Round(($i.Y - $p.Top) / $v.CellY, 2) }
+    }
+}
+function Get-DesktopLayout {
+    $v = [WinSettingsDesktop]::Read()
+    if (-not $v) { return $null }
+    [ordered]@{ AutoArrange = [bool]($v.Flags -band 1); AlignToGrid = [bool]($v.Flags -band 4); Icons = @(Get-DesktopIcons $v) }
+}
+# Which grid cell an icon is in, for spotting two icons on one spot
+function Get-DesktopCell($col, $row) { "$([math]::Floor($col)),$([math]::Floor($row))" }
+
+# Puts each saved icon this PC also has where it was on the old PC. Icons only one of the PCs has are left alone,
+# except that one of this PC's own icons moves to a free spot if a restored icon lands on it.
+function Set-DesktopLayout($saved) {
+    # Explorer has just restarted, so wait until the desktop has listed all its icons
+    $v = $null; $last = -1
+    for ($i = 0; $i -lt 30; $i++) {
+        try { $v = [WinSettingsDesktop]::Read() } catch { $v = $null }
+        if ($v -and $v.Icons.Count -eq $last) { break }
+        $last = if ($v) { $v.Icons.Count } else { -1 }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $v) { Write-Warning "Couldn't reach the desktop, so the icon layout wasn't applied. Run Run-Import.bat again once the desktop is showing."; return }
+    [WinSettingsDesktop]::SetFlags(5, $(if ($saved.AutoArrange) { 1 } else { 0 }) -bor $(if ($saved.AlignToGrid) { 4 } else { 0 }))
+    if ($saved.AutoArrange) { Write-Host 'Desktop icons: auto arrange is on, like the old PC, so Windows lines them up'; return }
+
+    $p = $v.Screens[0]
+    $here = @{}; foreach ($i in @(Get-DesktopIcons $v)) { $here[$i.Name] = $i }
+    $fits = { param($c, $r) $x = $p.Left + $c * $v.CellX; $y = $p.Top + $r * $v.CellY
+        foreach ($s in $v.Screens) { if ($x -ge $s.Left -and $y -ge $s.Top -and $x + $v.CellX -le $s.Right -and $y + $v.CellY -le $s.Bottom) { return $true } }; $false }
+    $moves = [ordered]@{}; $taken = @{}; $homeless = @(); $notHere = 0
+    foreach ($i in @($saved.Icons)) {
+        if (-not $here.ContainsKey($i.Name)) { $notHere++; continue }
+        $cell = Get-DesktopCell $i.Col $i.Row
+        if (-not (& $fits $i.Col $i.Row) -or $taken.ContainsKey($cell)) { $homeless += $i; continue }   # off this PC's screens
+        $moves[$i.Name] = $i; $taken[$cell] = $true
+    }
+    $bumped = @(foreach ($i in $here.Values) {
+        if ($moves.Contains($i.Name) -or @($homeless.Name) -contains $i.Name) { continue }
+        $cell = Get-DesktopCell $i.Col $i.Row
+        if ($taken.ContainsKey($cell)) { $i } else { $taken[$cell] = $true }
+    })
+    # Free spots on the primary monitor, top to bottom and then left to right, the way Windows fills a desktop
+    $cols = [math]::Floor(($p.Right - $p.Left) / $v.CellX); $rows = [math]::Floor(($p.Bottom - $p.Top) / $v.CellY)
+    foreach ($i in $homeless + $bumped) {
+        :find for ($c = 0; $c -lt $cols; $c++) { for ($r = 0; $r -lt $rows; $r++) {
+            if ($taken.ContainsKey("$c,$r")) { continue }
+            $taken["$c,$r"] = $true; $moves[$i.Name] = [pscustomobject]@{ Name = $i.Name; Col = $c; Row = $r }; break find
+        } }
+    }
+    $list = @($moves.Values)
+    $n = [WinSettingsDesktop]::Move([string[]]@($list.Name), [int[]]@($list | ForEach-Object { $p.Left + $_.Col * $v.CellX }), [int[]]@($list | ForEach-Object { $p.Top + $_.Row * $v.CellY }))
+    Write-Host "Desktop icons: $($n - $bumped.Count - $homeless.Count) placed like the old PC$(if ($notHere) { ", $notHere skipped (not on this PC)" })"
+    if ($homeless) { Write-Host "  Moved to a free spot because the old spot is off this PC's screens: $(@($homeless.Label) -join ', ')" }
+    if ($bumped) { Write-Host "  This PC's own icons moved out of the way: $(@($bumped.Label) -join ', ')" }
+}
+
 # Load a copy of the Default user profile (what every new account starts from) to compare against
 # Returns the hive's root key, or a string starting with "!" that explains why it couldn't
 function Mount-DefaultHive {
@@ -869,7 +1064,7 @@ function Get-SettingRows {
 }
 
 
-function Write-ChangesReport($rows, $file, $user, $machine, $recorded, [bool]$haveBaseline) {
+function Write-ChangesReport($rows, $file, $user, $machine, $recorded, [bool]$haveBaseline, $desk) {
     $known   = @($rows | Where-Object { $null -ne $_.Default })
     $changed = @($known | Where-Object { $_.Value -ne $_.Default })
     $same    = @($known | Where-Object { $_.Value -eq $_.Default })
@@ -898,6 +1093,11 @@ function Write-ChangesReport($rows, $file, $user, $machine, $recorded, [bool]$ha
         $md += '| Value | Yours | Default |', '|---|---|---|'
         $md += @($machine) | ForEach-Object { "| ``$($_.Key)\$($_.Name)`` | $(Format-MachineValue $_.Name $_.Data) | $(Format-MachineValue $_.Name $_.Default) |" }
     } else { $md += 'None.' }
+
+    $md += '', '## Desktop icon layout', ''
+    if ($desk) {
+        $md += "$(@($desk.Icons).Count) icons saved (auto arrange $(if ($desk.AutoArrange) { 'on' } else { 'off' }), align to grid $(if ($desk.AlignToGrid) { 'on' } else { 'off' })). Import puts each one this PC also has in the same spot and leaves the rest alone. See ``CHANGES_LONG.md`` for each icon's spot."
+    } else { $md += 'Not saved: export couldn''t reach the desktop.' }
 
     $disabledSvc = @($recorded.Services | Where-Object Start -eq 4 | ForEach-Object Name | Sort-Object)
     $onFeatures = @($recorded.Features | Where-Object Enabled | ForEach-Object Name | Sort-Object)
@@ -938,6 +1138,7 @@ function Write-LongReport($Path) {
     $sys = Get-Content "$Path\system.json" -Raw | ConvertFrom-Json
     $rec = Get-Content "$Path\recorded.json" -Raw | ConvertFrom-Json
     $defaults = @(Read-JsonArray "$Path\defaults.json")
+    $desk = if (Test-Path "$Path\desktop-icons.json") { Get-Content "$Path\desktop-icons.json" -Raw | ConvertFrom-Json }
     $changed = @($rows | Where-Object { $null -ne $_.Default })
     $info = @($rows | Where-Object { $null -eq $_.Default })
 
@@ -953,7 +1154,8 @@ function Write-LongReport($Path) {
             "| 6. Time, language, and system | $(4 + @($sys.HostsEntries).Count) |",
             "| 7. Files | $(@(Get-ChildItem "$Path\files" -Recurse -File -EA SilentlyContinue).Count) |",
             "| 8. Recorded, not applied by default | $(@($rec.Services).Count + @($rec.DisabledTasks).Count + @($rec.Features).Count + @($rec.Policies).Count) |",
-            "| 9. Named settings at default | $(@($defaults).Count) |", '')
+            "| 9. Named settings at default | $(@($defaults).Count) |",
+            "| 10. Desktop icon layout | $(@($desk.Icons).Count) |", '')
 
     $md += '## 1. Named settings changed from default', '', '| Category | Setting | Yours | Default | Registry values it reads |', '|---|---|---|---|---|'
     $md += $changed | ForEach-Object { "| $($_.Cat) | $($_.Name) | $(& $esc $_.Value) | $(& $esc $_.Default) | $((@($_.Sources) | ForEach-Object { '`' + $_.Replace('|', '\') + '`' }) -join '<br>') |" }
@@ -1006,6 +1208,13 @@ function Write-LongReport($Path) {
         $regs = @($d.Values) | ForEach-Object { '`' + "$($_.Key)\$($_.Name)" + '` = ' + $(if ($_.Missing) { '(missing)' } else { & $esc (& $fmt $_.Kind $_.Data) }) }
         "| $($d.Cat) | $($d.Name) | $(& $esc $d.Value) | $(if ($d.Device) { 'Varies by PC' } else { 'Windows' }) | $($regs -join '<br>') |"
     }
+
+    $md += '', '## 10. Desktop icon layout', ''
+    if ($desk) {
+        $md += "Auto arrange $(if ($desk.AutoArrange) { 'on' } else { 'off' }), align to grid $(if ($desk.AlignToGrid) { 'on' } else { 'off' }). **Column** and **Row** count grid spots from the primary monitor's top-left corner (0, 0); negative or large ones are on other monitors. Import matches icons by **File name**.", '',
+               '| Icon | File name | Column | Row |', '|---|---|---|---|'
+        $md += @($desk.Icons) | Sort-Object Col, Row | ForEach-Object { "| $(& $esc $_.Label) | ``$($_.Name)`` | $($_.Col) | $($_.Row) |" }
+    } else { $md += 'Not saved.' }
 
     $md | Set-Content "$Path\CHANGES_LONG.md" -Encoding UTF8
 }
@@ -1117,13 +1326,18 @@ if ($Mode -eq 'Export') {
     if (Test-Path "$StartPinsDir\start2.bin") { Copy-Item "$StartPinsDir\start*.bin" "$Path\files\" -Force; Write-Host 'Copied Start menu pins' }
     if (Test-Path $PinnedDir) { Copy-Item $PinnedDir "$Path\files\UserPinned" -Recurse -Force; Write-Host "Copied taskbar pins: $((Get-TaskbarPins) -join ', ')" }
     if (Test-Path $QuickAccess) { Copy-Item $QuickAccess "$Path\files\quickaccess.bin" -Force; Write-Host 'Copied Quick access pins' }
+    try {
+        $desk = Get-DesktopLayout
+        if ($desk) { Save-Json $desk "$Path\desktop-icons.json"; Write-Host "Saved desktop icon layout: $($desk.Icons.Count) icons" }
+        else { Write-Warning "Couldn't reach the desktop, so the icon layout wasn't saved." }
+    } catch { $desk = $null; Write-Warning "Couldn't read the desktop icon layout: $(Get-ErrorText $_)" }
 
     $env:USERPROFILE | Set-Content "$Path\source-profile.txt"
     Save-Json ([ordered]@{ Computer = $env:COMPUTERNAME; Date = (Get-Date -Format 'yyyy-MM-dd h:mm tt'); Baseline = [bool]$hive }) "$Path\meta.json"
 
     # Named settings: save only changed ones and ones with no fixed default
     Save-Json @($rows | Where-Object { $null -eq $_.Default -or $_.Value -ne $_.Default }) "$Path\settings.json"
-    $n = Write-ChangesReport $rows "$Path\CHANGES.md" $user $machine $recorded ([bool]$hive)
+    $n = Write-ChangesReport $rows "$Path\CHANGES.md" $user $machine $recorded ([bool]$hive) $desk
     Write-Host "Wrote CHANGES.md ($n named settings changed from default)"
     Write-LongReport $Path
     Write-Host 'Wrote CHANGES_LONG.md (every saved change in full detail)'
@@ -1208,6 +1422,29 @@ if ($Mode -eq 'Diff') {
         if ($bp[$id] -ne $lp[$id]) { $recDiff.Add([pscustomobject]@{ Item = "Policy: $id"; Backup = (& $trim (Or $bp[$id] '(missing)')); Current = (& $trim (Or $lp[$id] '(missing)')) }) }
     }
 
+    # Desktop icons both PCs have, compared by grid spot
+    $deskDiff = @(); $deskNote = $null
+    if (-not (Test-Path "$Path\desktop-icons.json")) { $deskNote = 'The backup has no desktop icon layout (an older version made it).' }
+    else {
+        $bd = Get-Content "$Path\desktop-icons.json" -Raw | ConvertFrom-Json
+        $lv = $null; try { $lv = [WinSettingsDesktop]::Read() } catch { }
+        if (-not $lv) { $deskNote = 'Couldn''t reach the desktop, so icons weren''t compared.' }
+        else {
+            foreach ($f in @(@('Auto arrange', $bd.AutoArrange, [bool]($lv.Flags -band 1)), @('Align to grid', $bd.AlignToGrid, [bool]($lv.Flags -band 4)))) {
+                if ([bool]$f[1] -ne $f[2]) { $deskDiff += [pscustomobject]@{ Icon = $f[0]; Backup = (OnOff $f[1]); Current = (OnOff $f[2]) } }
+            }
+            $here = @{}; foreach ($i in @(Get-DesktopIcons $lv)) { $here[$i.Name] = $i }
+            $deskSkipped = 0
+            foreach ($i in @($bd.Icons)) {
+                $c = $here[$i.Name]
+                if (-not $c) { $deskSkipped++; continue }
+                if ((Get-DesktopCell $i.Col $i.Row) -ne (Get-DesktopCell $c.Col $c.Row)) { $deskDiff += [pscustomobject]@{ Icon = $i.Label; Backup = "column $([math]::Floor($i.Col)), row $([math]::Floor($i.Row))"; Current = "column $([math]::Floor($c.Col)), row $([math]::Floor($c.Row))" } }
+            }
+            if ($bd.AutoArrange) { $deskNote = 'Auto arrange was on in the backup, so Windows decides where icons go and spots aren''t compared.'; $deskDiff = @($deskDiff | Where-Object { $_.Icon -in 'Auto arrange', 'Align to grid' }) }
+            elseif ($deskSkipped) { $deskNote = "$deskSkipped icons in the backup aren't on this PC, so Import skips them." }
+        }
+    }
+
     $esc = { param($s) "$s" -replace '\|', '\|' }
     $md = @('# Settings diff', '',
             "Backup from **$($meta.Computer)** ($($meta.Date)) compared with **$env:COMPUTERNAME** on $(Get-Date -Format 'yyyy-MM-dd h:mm tt'). Nothing was changed.", '',
@@ -1231,11 +1468,17 @@ if ($Mode -eq 'Diff') {
         $md += '| Item | Backup | Current |', '|---|---|---|'
         $md += $recDiff | ForEach-Object { "| ``$($_.Item)`` | $(& $esc $_.Backup) | $(& $esc $_.Current) |" }
     }
+    $md += '', "## $(@($deskDiff).Count) desktop icon differences", '', 'Only icons on both PCs. Spots count from the primary monitor''s top-left corner.', ''
+    if ($deskNote) { $md += $deskNote, '' }
+    if (@($deskDiff).Count) {
+        $md += '| Icon | Backup | Current |', '|---|---|---|'
+        $md += @($deskDiff) | ForEach-Object { "| $(& $esc $_.Icon) | $($_.Backup) | $($_.Current) |" }
+    }
     $md | Set-Content $out -Encoding UTF8
 
     if ($named.Count) { $named | Format-Table Category, Setting, Backup, Current, Default -AutoSize -Wrap | Out-String -Width 200 | Write-Host }
     else { Write-Host "`nAll named settings match the backup." -ForegroundColor Green }
-    Write-Host "$($raw.Count) other saved values and $($recDiff.Count) recorded items differ (listed in DIFF.md)."
+    Write-Host "$($raw.Count) other saved values, $($recDiff.Count) recorded items, and $(@($deskDiff).Count) desktop icons differ (listed in DIFF.md)."
     Write-Host "`nFull report: $out" -ForegroundColor Green
     return
 }
@@ -1472,6 +1715,11 @@ if ($IsAdmin) {
 }
 
 if (-not (Get-Process explorer -EA SilentlyContinue)) { Start-Process explorer }   # Windows may have restarted it already
+# Desktop icons go in once Explorer is back, since the desktop is part of it
+if (Test-Path "$Path\desktop-icons.json") {
+    try { Set-DesktopLayout (Get-Content "$Path\desktop-icons.json" -Raw | ConvertFrom-Json) }
+    catch { Write-Warning "Couldn't set the desktop icon layout: $(Get-ErrorText $_)" }
+} else { Write-Host 'Desktop icons: this backup has no layout (an older version made it). Re-run the export on the old PC to include it.' }
 # Windows can put back its own copy of CloudStore settings, so check they stuck once Explorer is running again
 if ($cloudWritten) {
     Start-Sleep -Seconds 5
