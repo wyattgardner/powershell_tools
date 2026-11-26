@@ -1,0 +1,11 @@
+# Your server: settings with the game password, adminlist, whitelist, backups
+/server/
+
+# Downloaded by install.cmd
+/bin/
+
+# Your settings
+/settings.ps1
+
+# Generated
+/logs/

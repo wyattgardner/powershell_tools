@@ -33,6 +33,14 @@ Runs one or more Spigot servers on a Windows PC as proper Windows services, usin
 - Optional daily maintenance: updates, warnings to players, a restart, and optionally Windows updates and a reboot.
 - A console window with the live log for typing commands, plus a version you can run from another PC on your network.
 
+### [Factorio Server Tool](Server%20Tools/Factorio%20Server%20Tool/)
+
+Runs a Factorio dedicated server on a Windows PC as a Windows service, using NSSM. Lives under `Server Tools\`.
+
+- Starts at boot before anyone logs in, restarts itself if it crashes, and saves the map whenever it's stopped, including at shutdown.
+- Copies the save to a backups folder on every stop and nightly.
+- `update.cmd` updates the game with steamcmd and keeps saves and settings.
+
 ### [Syncthing Monitor Tool](Syncthing%20Monitor%20Tool/)
 
 Emails you when Syncthing stops syncing, so a broken sync can't go unnoticed for months.
@@ -44,7 +52,7 @@ Emails you when Syncthing stops syncing, so a broken sync can't go unnoticed for
 
 ## Using them
 
-Each tool's README covers setup and use. The Windows tools run from their `Run-*.bat` files, with default options in `config.example.psd1` and your own in `config.psd1`. The Minecraft tool starts from `install.cmd`, with options in `settings.ps1` and `install.config.ps1`. The Syncthing monitor starts from `set-credential.cmd` and `install.cmd`, with your email addresses in `settings.ps1`.
+Each tool's README covers setup and use. The Windows tools run from their `Run-*.bat` files, with default options in `config.example.psd1` and your own in `config.psd1`. The Minecraft tool starts from `install.cmd`, with options in `settings.ps1` and `install.config.ps1`. The Factorio tool starts from `install.cmd`, with options in `settings.ps1`. The Syncthing monitor starts from `set-credential.cmd` and `install.cmd`, with your email addresses in `settings.ps1`.
 
 What the tools generate or what holds your own data (settings backups, reports, server folders and worlds, RCON passwords, the stored app password, downloaded binaries, logs) is excluded by each tool's `.gitignore`. The root `.gitignore` covers what applies everywhere, like logs and editor files.
 
